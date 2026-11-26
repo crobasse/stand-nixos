@@ -1,0 +1,505 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# stand-ctl — CLI de contrôle du projet Photo Stand (NixOS)
+#
+# Usage :
+#   ./stand-ctl                 Menu interactif
+#   ./stand-ctl install         Installer et configurer une instance fraîche NixOS
+#   ./stand-ctl prod [action]   Lancer / contrôler la version de production
+#   ./stand-ctl test [action]   Lancer / contrôler la version de test (VM QEMU)
+#   ./stand-ctl help            Afficher l'aide complète
+# ==============================================================================
+
+set -euo pipefail
+
+# Résolution du dossier du dépôt stand-nixos (même si appelé via `nix run`)
+if [ -n "${STAND_NIXOS_DIR:-}" ]; then
+  REPO_DIR="$STAND_NIXOS_DIR"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "$SCRIPT_DIR/flake.nix" ] && [ -w "$SCRIPT_DIR" ]; then
+    REPO_DIR="$SCRIPT_DIR"
+  elif [ -f "$PWD/flake.nix" ] && [ -f "$PWD/config.nix" ]; then
+    REPO_DIR="$PWD"
+  else
+    REPO_DIR="$SCRIPT_DIR"
+  fi
+fi
+
+NIX_FLAGS=(--extra-experimental-features "nix-command flakes")
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/stand-nixos"
+VM_DISK="$STATE_DIR/photostand-vm.qcow2"
+VM_SSH_PORT=2222
+
+# Couleurs (désactivées si sortie non interactive)
+if [ -t 1 ]; then
+  BOLD='\033[1m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[0;33m'
+  RED='\033[0;31m'
+  CYAN='\033[0;36m'
+  NC='\033[0m'
+else
+  BOLD='' GREEN='' YELLOW='' RED='' CYAN='' NC=''
+fi
+
+info()    { echo -e "${CYAN}[stand-ctl]${NC} $*"; }
+success() { echo -e "${GREEN}[stand-ctl]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[stand-ctl]${NC} $*"; }
+error()   { echo -e "${RED}[stand-ctl] Erreur :${NC} $*" >&2; }
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    error "Commande requise introuvable : '$1'."
+    exit 1
+  fi
+}
+
+require_writable_repo() {
+  if [ ! -f "$REPO_DIR/flake.nix" ] || [ ! -w "$REPO_DIR" ]; then
+    error "Exécutez cette commande depuis le dépôt cloné stand-nixos (dossier actuel : $REPO_DIR)."
+    exit 1
+  fi
+}
+
+# Dans un dépôt Git, Nix Flakes ne voit que les fichiers suivis par l'index Git.
+stage_local_files_if_git() {
+  if [ -d "$REPO_DIR/.git" ]; then
+    local to_add=()
+    [ -f "$REPO_DIR/host/hardware-configuration.nix" ] && to_add+=("host/hardware-configuration.nix")
+    [ -f "$REPO_DIR/local.nix" ] && to_add+=("local.nix")
+    if [ ${#to_add[@]} -gt 0 ]; then
+      git -C "$REPO_DIR" add -f "${to_add[@]}"
+    fi
+  fi
+}
+
+detect_lan_ip() {
+  local ip=""
+  if command -v ip >/dev/null 2>&1; then
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || true)"
+  fi
+  echo "${ip:-localhost}"
+}
+
+prompt_default() {
+  local prompt_text="$1"
+  local default_val="$2"
+  local var_name="$3"
+  local answer=""
+  read -r -p "$prompt_text [$default_val] : " answer
+  if [ -z "$answer" ]; then
+    printf -v "$var_name" '%s' "$default_val"
+  else
+    printf -v "$var_name" '%s' "$answer"
+  fi
+}
+
+# ==============================================================================
+# 1. INSTALL — Installer & configurer une instance fraîche de NixOS
+# ==============================================================================
+cmd_install() {
+  require_writable_repo
+  require_cmd nix
+  require_cmd nixos-rebuild
+
+  if [ ! -f /etc/nixos/hardware-configuration.nix ]; then
+    error "/etc/nixos/hardware-configuration.nix introuvable."
+    echo "Cette commande doit être exécutée sur une installation NixOS."
+    exit 1
+  fi
+
+  echo ""
+  echo -e "${BOLD}=== Installation & configuration d'un Photo Stand (NixOS frais) ===${NC}"
+  echo ""
+
+  # 1. Copier hardware-configuration.nix
+  info "Copie de /etc/nixos/hardware-configuration.nix -> host/hardware-configuration.nix"
+  mkdir -p "$REPO_DIR/host"
+  cp /etc/nixos/hardware-configuration.nix "$REPO_DIR/host/hardware-configuration.nix"
+
+  # 2. Assistant de configuration -> local.nix (sans modifier config.nix versionné)
+  local stand_id role_choice profiles_nix primary_ip storage_endpoint
+  local printer_name usb_args ssh_key_file ssh_key_nix auto_update
+  local detected_ip
+  detected_ip="$(detect_lan_ip)"
+
+  prompt_default "Identifiant du stand (ex: stand-1, stand-a)" "stand-1" stand_id
+
+  echo ""
+  echo "Profil du PC :"
+  echo "  1) PC principal avec imprimante USB (primary + print-vm Windows) [défaut]"
+  echo "  2) PC principal sans VM Windows     (primary uniquement)"
+  echo "  3) PC secondaire (ingest uniquement)(secondary)"
+  read -r -p "Choix [1] : " role_choice
+  role_choice="${role_choice:-1}"
+
+  case "$role_choice" in
+    1)
+      profiles_nix='[ "primary" "print-vm" ]'
+      prompt_default "IP du PC principal (localhost ou IP LAN pour accès multi-postes)" "$detected_ip" primary_ip
+      storage_endpoint="minio:9000"
+      ;;
+    2)
+      profiles_nix='[ "primary" ]'
+      prompt_default "IP du PC principal (localhost ou IP LAN)" "$detected_ip" primary_ip
+      storage_endpoint="minio:9000"
+      ;;
+    3)
+      profiles_nix='[ "secondary" ]'
+      prompt_default "IP du PC principal (PC A sur le réseau local)" "$detected_ip" primary_ip
+      storage_endpoint="${primary_ip}:9000"
+      ;;
+    *)
+      error "Choix invalide : $role_choice"
+      exit 1
+      ;;
+  esac
+
+  printer_name="FUJIFILM DX100"
+  usb_args="-device usb-host,vendorid=0x04cb,productid=0x5007"
+  if [ "$role_choice" = "1" ]; then
+    echo ""
+    if command -v lsusb >/dev/null 2>&1; then
+      info "Périphériques USB détectés (vérifiez vendor:product de l'imprimante) :"
+      lsusb || true
+    fi
+    prompt_default "Nom de l'imprimante dans Windows (vide = imprimante par défaut)" "$printer_name" printer_name
+    prompt_default "Arguments USB passthrough QEMU" "$usb_args" usb_args
+  fi
+
+  echo ""
+  prompt_default "Clé SSH privée pour dépôts Git privés (laisser vide si HTTPS public)" "" ssh_key_file
+  if [ -n "$ssh_key_file" ]; then
+    ssh_key_nix="\"$ssh_key_file\""
+  else
+    ssh_key_nix="null"
+  fi
+
+  prompt_default "Mettre à jour automatiquement les dépôts Git au boot ? (true/false)" "true" auto_update
+
+  local current_uid current_gid
+  current_uid="$(id -u)"
+  current_gid="$(id -g)"
+  if [ "$current_uid" -eq 0 ]; then
+    current_uid=1000
+    current_gid=100
+  fi
+
+  cat > "$REPO_DIR/local.nix" <<EOF
+# Configuration spécifique à cette machine générée par \`stand-ctl install\`.
+# Surcharge \`config.nix\` sans le modifier (pas de conflit lors des \`git pull\`).
+{
+  autoUpdateRepos = ${auto_update};
+  gitSshKeyFile = ${ssh_key_nix};
+
+  stand = {
+    standId = "${stand_id}";
+    composeProfiles = ${profiles_nix};
+    primaryIp = "${primary_ip}";
+    storageEndpoint = "${storage_endpoint}";
+    puid = ${current_uid};
+    pgid = ${current_gid};
+    printVm = {
+      printerName = "${printer_name}";
+      usbArgs = "${usb_args}";
+    };
+  };
+}
+EOF
+
+  success "Configuration machine écrite dans $REPO_DIR/local.nix"
+  echo ""
+  cat "$REPO_DIR/local.nix"
+  echo ""
+
+  stage_local_files_if_git
+
+  read -r -p "Appliquer maintenant sur cette machine (sudo nixos-rebuild switch --flake .#stand) ? [O/n] : " confirm
+  confirm="${confirm:-O}"
+  if [[ "$confirm" =~ ^[OoYy]$ ]]; then
+    cmd_prod_rebuild
+    echo ""
+    success "Installation terminée ! Le stand démarrera désormais automatiquement à chaque boot."
+    echo "  - Pensez à changer le mot de passe initial de l'utilisateur 'stand' si besoin : sudo passwd stand"
+    echo "  - Commandes utiles : ./stand-ctl prod status | ./stand-ctl prod logs"
+  else
+    warn "Application ignorée. Lancez './stand-ctl prod rebuild' quand vous serez prêt."
+  fi
+}
+
+# ==============================================================================
+# 2. PROD — Lancer / contrôler la version de production
+# ==============================================================================
+cmd_prod_rebuild() {
+  require_writable_repo
+  require_cmd nixos-rebuild
+
+  if [ ! -f "$REPO_DIR/host/hardware-configuration.nix" ]; then
+    error "host/hardware-configuration.nix est absent. Lancez d'abord : ./stand-ctl install"
+    exit 1
+  fi
+
+  stage_local_files_if_git
+  info "Application de la configuration NixOS de production (.#stand)..."
+  (
+    cd "$REPO_DIR"
+    sudo nixos-rebuild switch --flake ".#stand" "${NIX_FLAGS[@]}"
+  )
+  success "Configuration NixOS de production appliquée et démarrée."
+}
+
+cmd_prod_update() {
+  require_writable_repo
+  require_cmd git
+  require_cmd nixos-rebuild
+
+  if [ ! -d "$REPO_DIR/.git" ]; then
+    error "$REPO_DIR n'est pas un dépôt Git : impossible de faire 'git pull'."
+    exit 1
+  fi
+
+  info "Récupération des dernières modifications de stand-nixos (git pull --ff-only)..."
+  # Dé-stage temporairement les fichiers locaux pour éviter tout blocage (ex: pull.rebase=true)
+  git -C "$REPO_DIR" reset -q HEAD -- host/hardware-configuration.nix local.nix 2>/dev/null || true
+
+  if ! git -C "$REPO_DIR" pull --ff-only; then
+    stage_local_files_if_git
+    error "git pull --ff-only a échoué. Vérifiez l'état Git du dépôt : git -C $REPO_DIR status"
+    exit 1
+  fi
+
+  cmd_prod_rebuild
+
+  info "Synchronisation des dépôts de services et mise à jour Docker Compose..."
+  sudo systemctl restart photostand-sync-repos.service
+  sudo systemctl restart photostand-compose.service
+  success "Stand entièrement mis à jour et redémarré."
+  cmd_prod_status
+}
+
+cmd_prod_ensure_installed() {
+  if ! systemctl list-unit-files photostand-compose.service >/dev/null 2>&1 || \
+     ! systemctl list-unit-files photostand-compose.service | grep -q photostand-compose.service; then
+    warn "Le service de production Photo Stand n'est pas encore installé sur cette machine NixOS."
+    echo "Lancez d'abord :"
+    echo "  ./stand-ctl install        # pour une installation fraîche"
+    echo "  ./stand-ctl prod rebuild   # si hardware-configuration.nix est déjà prêt"
+    exit 1
+  fi
+}
+
+cmd_prod_start() {
+  cmd_prod_ensure_installed
+  info "Synchronisation des dépôts et démarrage de la stack de production..."
+  sudo systemctl start photostand-sync-repos.service
+  sudo systemctl start photostand-compose.service
+  success "Stack de production démarrée."
+  cmd_prod_status
+}
+
+cmd_prod_stop() {
+  cmd_prod_ensure_installed
+  info "Arrêt de la stack de production..."
+  sudo systemctl stop photostand-compose.service
+  success "Stack de production arrêtée."
+}
+
+cmd_prod_restart() {
+  cmd_prod_ensure_installed
+  info "Re-synchronisation Git et redémarrage de la stack de production..."
+  sudo systemctl restart photostand-sync-repos.service
+  sudo systemctl restart photostand-compose.service
+  success "Stack de production redémarrée."
+  cmd_prod_status
+}
+
+cmd_prod_status() {
+  cmd_prod_ensure_installed
+  if command -v stand-status >/dev/null 2>&1; then
+    sudo stand-status
+  else
+    systemctl --no-pager -l status photostand-sync-repos.service photostand-compose.service || true
+  fi
+}
+
+cmd_prod_logs() {
+  cmd_prod_ensure_installed
+  if command -v stand-logs >/dev/null 2>&1; then
+    sudo stand-logs "$@"
+  else
+    journalctl -u photostand-compose.service -f
+  fi
+}
+
+cmd_prod() {
+  local action="${1:-start}"
+  shift || true
+  case "$action" in
+    start)   cmd_prod_start ;;
+    stop)    cmd_prod_stop ;;
+    restart) cmd_prod_restart ;;
+    status)  cmd_prod_status ;;
+    logs)    cmd_prod_logs "$@" ;;
+    rebuild) cmd_prod_rebuild ;;
+    update)  cmd_prod_update ;;
+    *)
+      error "Action prod inconnue : '$action'"
+      echo "Actions disponibles : start | stop | restart | status | logs [service] | rebuild | update"
+      exit 1
+      ;;
+  esac
+}
+
+# ==============================================================================
+# 3. TEST — Lancer / contrôler la version de test (VM QEMU isolée)
+# ==============================================================================
+cmd_test_start() {
+  require_cmd nix
+  info "Construction et démarrage de la VM NixOS de test (console, aucune modification sur votre PC hôte)..."
+  (
+    cd "$REPO_DIR"
+    exec nix "${NIX_FLAGS[@]}" run ".#vm" -- "$@"
+  )
+}
+
+cmd_test_gui() {
+  require_cmd nix
+  info "Construction et démarrage de la VM NixOS de test graphique (i3 + Firefox plein écran)..."
+  (
+    cd "$REPO_DIR"
+    exec nix "${NIX_FLAGS[@]}" run ".#vm-gui" -- "$@"
+  )
+}
+
+cmd_test_build() {
+  require_cmd nix
+  info "Construction de l'image VM NixOS de test..."
+  (
+    cd "$REPO_DIR"
+    nix "${NIX_FLAGS[@]}" build ".#vm"
+  )
+  success "VM construite (./result/bin/run-photostand-vm-vm)."
+}
+
+cmd_test_reset() {
+  if [ -f "$VM_DISK" ]; then
+    rm -f "$VM_DISK"
+    success "Disque VM supprimé ($VM_DISK). Le prochain './stand-ctl test' repartira d'une VM vierge."
+  else
+    info "Aucun disque VM trouvé à $VM_DISK (déjà vierge)."
+  fi
+}
+
+cmd_test_ssh() {
+  require_cmd ssh
+  info "Connexion SSH à la VM de test (mot de passe : stand)..."
+  exec ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -p "$VM_SSH_PORT" \
+    root@127.0.0.1 "$@"
+}
+
+cmd_test() {
+  local action="${1:-start}"
+  shift || true
+  case "$action" in
+    start) cmd_test_start "$@" ;;
+    gui)   cmd_test_gui "$@" ;;
+    build) cmd_test_build ;;
+    reset) cmd_test_reset ;;
+    ssh)   cmd_test_ssh "$@" ;;
+    *)
+      error "Action test inconnue : '$action'"
+      echo "Actions disponibles : start | gui | build | reset | ssh"
+      exit 1
+      ;;
+  esac
+}
+
+# ==============================================================================
+# Aide & Menu interactif
+# ==============================================================================
+cmd_help() {
+  cat <<'EOF'
+stand-ctl — Outil CLI de contrôle du projet Photo Stand (NixOS)
+
+USAGE :
+  ./stand-ctl                      Ouvre le menu interactif
+  ./stand-ctl install              Installe et configure le stand sur un NixOS frais
+  ./stand-ctl prod [action]        Contrôle la version de production sur cette machine
+  ./stand-ctl test [action]        Contrôle la version de test en VM QEMU isolée
+  ./stand-ctl help                 Affiche cette aide
+
+ACTIONS PROD :
+  ./stand-ctl prod                 Démarre (ou synchronise + démarre) la prod
+  ./stand-ctl prod start           Démarre la stack de production
+  ./stand-ctl prod stop            Arrête la stack de production
+  ./stand-ctl prod restart         Re-synchronise les dépôts Git et redémarre
+  ./stand-ctl prod status          Affiche l'état systemd + Docker Compose
+  ./stand-ctl prod logs [service]  Suit les logs Docker Compose en direct
+  ./stand-ctl prod rebuild         Applique config.nix/local.nix (nixos-rebuild switch)
+  ./stand-ctl prod update          git pull stand-nixos + nixos-rebuild switch + resync services
+
+ACTIONS TEST (VM QEMU ISOLÉE) :
+  ./stand-ctl test                 Construit et démarre la VM de test (console)
+  ./stand-ctl test gui             Démarre la VM en mode graphique (i3 + Firefox plein écran)
+  ./stand-ctl test start           Idem console (passe les args supplémentaires à QEMU)
+  ./stand-ctl test build           Construit la VM sans la lancer
+  ./stand-ctl test ssh             Ouvre un shell SSH dans la VM (port 2222)
+  ./stand-ctl test reset           Supprime le disque persistant de la VM
+EOF
+}
+
+cmd_menu() {
+  echo ""
+  echo -e "${BOLD}================================================${NC}"
+  echo -e "${BOLD}  Photo Stand — CLI de contrôle (stand-ctl)${NC}"
+  echo -e "${BOLD}================================================${NC}"
+  echo "  1) Installer & configurer un NixOS frais     (install)"
+  echo "  2) Lancer la version de production           (prod start)"
+  echo "  3) Mettre à jour le stand (pull + rebuild)   (prod update)"
+  echo "  4) Lancer la VM de test (console)            (test start)"
+  echo "  5) Lancer la VM de test graphique (i3+FF)    (test gui)"
+  echo "  6) Statut de la production                   (prod status)"
+  echo "  7) Reconstruire la config NixOS prod         (prod rebuild)"
+  echo "  8) Réinitialiser le disque de la VM test     (test reset)"
+  echo "  q) Quitter"
+  echo ""
+  read -r -p "Votre choix : " choice
+  case "$choice" in
+    1) cmd_install ;;
+    2) cmd_prod start ;;
+    3) cmd_prod update ;;
+    4) cmd_test start ;;
+    5) cmd_test gui ;;
+    6) cmd_prod status ;;
+    7) cmd_prod rebuild ;;
+    8) cmd_test reset ;;
+    q|Q|"") exit 0 ;;
+    *)
+      error "Choix invalide : $choice"
+      exit 1
+      ;;
+  esac
+}
+
+# Point d'entrée principal
+if [ $# -eq 0 ]; then
+  cmd_menu
+else
+  case "$1" in
+    install)      shift; cmd_install "$@" ;;
+    prod)         shift; cmd_prod "$@" ;;
+    test)         shift; cmd_test "$@" ;;
+    menu)         cmd_menu ;;
+    -h|--help|help) cmd_help ;;
+    *)
+      error "Commande inconnue : '$1'"
+      echo ""
+      cmd_help
+      exit 1
+      ;;
+  esac
+fi

@@ -1,0 +1,6 @@
+*.qcow2
+vm-capture/
+host/hardware-configuration.nix
+local.nix
+result
+result-*
