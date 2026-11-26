@@ -80,11 +80,14 @@ let
         <div class="spinner"></div>
         <h1>Photo Stand</h1>
         <p id="status">Démarrage des services en cours...</p>
-        <p>Cible : ${frontendUrl}</p>
-        <a href="${frontendUrl}">Ouvrir maintenant</a>
+        <p id="target-label">Cible : ${frontendUrl}</p>
+        <a id="open-link" href="${frontendUrl}">Ouvrir maintenant</a>
         <div class="hint">i3 : Super+F (quitter plein écran / voir i3status) · Super+Entrée (terminal) · Super+D (applications)</div>
         <script>
-          const target = ${builtins.toJSON frontendUrl};
+          const params = new URLSearchParams(window.location.search);
+          const target = params.get("target") || ${builtins.toJSON frontendUrl};
+          document.getElementById("target-label").textContent = "Cible : " + target;
+          document.getElementById("open-link").href = target;
           async function check() {
             try {
               await fetch(target, { mode: "no-cors", cache: "no-store" });
@@ -101,10 +104,21 @@ let
 
   launchFrontendScript = pkgs.writeShellScript "photostand-launch-frontend" ''
     TARGET=${lib.escapeShellArg frontendUrl}
+    CMDLINE_PROFILES=""
+    CMDLINE_PRIMARY_IP=""
+    for token in $(cat /proc/cmdline); do
+      case "$token" in
+        stand.profiles=*)   CMDLINE_PROFILES="''${token#stand.profiles=}" ;;
+        stand.primary_ip=*) CMDLINE_PRIMARY_IP="''${token#stand.primary_ip=}" ;;
+      esac
+    done
+    if [ -n "$CMDLINE_PROFILES" ] && [[ ",$CMDLINE_PROFILES," != *",primary,"* ]] && [ -n "$CMDLINE_PRIMARY_IP" ]; then
+      TARGET="http://$CMDLINE_PRIMARY_IP"
+    fi
     if ${pkgs.curl}/bin/curl -fsS --max-time 2 "$TARGET" >/dev/null 2>&1; then
       exec ${pkgs.firefox}/bin/firefox --new-window "$TARGET"
     else
-      exec ${pkgs.firefox}/bin/firefox --new-window "file://${waitingPage}"
+      exec ${pkgs.firefox}/bin/firefox --new-window "file://${waitingPage}?target=$TARGET"
     fi
   '';
 

@@ -52,7 +52,10 @@ let
         pkgs.openssh
         pkgs.coreutils
         pkgs.gnugrep
+        pkgs.gnused
         pkgs.curl
+        pkgs.jq
+        pkgs.nix
       ]
     }:$PATH"
 
@@ -62,14 +65,16 @@ let
 
     mkdir -p ${lib.escapeShellArg cfg.dataDir}
 
-    # Attendre brièvement que la résolution DNS soit prête (utile au boot QEMU)
-    for i in $(seq 1 15); do
+    # Attendre brièvement que la résolution DNS soit prête (utile au boot QEMU / iPXE)
+    for i in $(seq 1 20); do
       if curl -fsS --max-time 3 https://github.com >/dev/null 2>&1; then
         break
       fi
-      echo "[sync-repos] Attente du réseau ($i/15)..."
+      echo "[sync-repos] Attente du réseau ($i/20)..."
       sleep 2
     done
+
+    AUTO_UPDATE="${lib.boolToString cfg.autoUpdateRepos}"
 
     sync_one() {
       local name="$1"
@@ -82,7 +87,7 @@ let
         rm -rf "$dest"
         git clone "$url" "$dest"
         git -C "$dest" checkout "$ref"
-      elif [ "${lib.boolToString cfg.autoUpdateRepos}" = "true" ]; then
+      elif [ "$AUTO_UPDATE" = "true" ]; then
         echo "[sync-repos] Mise à jour de $name ($url @ $ref)..."
         git -C "$dest" remote set-url origin "$url"
         if git -C "$dest" fetch --all --tags --prune; then
@@ -99,17 +104,111 @@ let
       fi
     }
 
-    ${lib.concatStringsSep "\n" (
-      lib.mapAttrsToList (
-        name: repo:
-        "sync_one ${lib.escapeShellArg name} ${lib.escapeShellArg repo.url} ${lib.escapeShellArg repo.ref}"
-      ) cfg.repos
-    )}
+    USE_DYNAMIC_CONFIG=false
 
-    # Générer le fichier .env déclaratif pour stand-infra/docker-compose.yml
-    cat > ${lib.escapeShellArg "${infraDir}/.env"} <<'EOF'
+    ${lib.optionalString cfg.dynamicConfigFromCmdline ''
+      # Lecture des paramètres noyau iPXE : stand.repo=..., stand.ref=..., stand.id=...,
+      # stand.primary_ip=..., stand.profiles=..., stand.storage_endpoint=...
+      CMDLINE_REPO=""
+      CMDLINE_REF="main"
+      CMDLINE_STAND_ID=""
+      CMDLINE_PRIMARY_IP=""
+      CMDLINE_PROFILES=""
+      CMDLINE_STORAGE_ENDPOINT=""
+
+      for token in $(cat /proc/cmdline); do
+        case "$token" in
+          stand.repo=*)             CMDLINE_REPO="''${token#stand.repo=}" ;;
+          stand.ref=*)              CMDLINE_REF="''${token#stand.ref=}" ;;
+          stand.id=*)               CMDLINE_STAND_ID="''${token#stand.id=}" ;;
+          stand.primary_ip=*)       CMDLINE_PRIMARY_IP="''${token#stand.primary_ip=}" ;;
+          stand.profiles=*)         CMDLINE_PROFILES="''${token#stand.profiles=}" ;;
+          stand.storage_endpoint=*) CMDLINE_STORAGE_ENDPOINT="''${token#stand.storage_endpoint=}" ;;
+        esac
+      done
+
+      if [ -n "$CMDLINE_REPO" ]; then
+        echo "[sync-repos] Mode iPXE dynamique : récupération de stand-nixos depuis $CMDLINE_REPO ($CMDLINE_REF)..."
+        sync_one "stand-nixos" "$CMDLINE_REPO" "$CMDLINE_REF"
+
+        STAND_CFG_FILE="${cfg.dataDir}/stand-nixos/config.nix"
+        if [ -f "$STAND_CFG_FILE" ]; then
+          CFG_JSON="$(nix --extra-experimental-features nix-command eval --json --impure --expr "import $STAND_CFG_FILE")"
+          AUTO_UPDATE="$(echo "$CFG_JSON" | jq -r '.autoUpdateRepos // true')"
+
+          while IFS=$'\t' read -r rname rurl rref; do
+            sync_one "$rname" "$rurl" "$rref"
+          done < <(echo "$CFG_JSON" | jq -r '.repos | to_entries[] | [.key, .value.url, (.value.ref // "main")] | @tsv')
+
+          DYN_PROFILES="$(echo "$CFG_JSON" | jq -r '(.stand.composeProfiles // ["primary"]) | join(",")')"
+          DYN_STAND_ID="$(echo "$CFG_JSON" | jq -r '.stand.standId // "stand-1"')"
+          DYN_PRIMARY_IP="$(echo "$CFG_JSON" | jq -r '.stand.primaryIp // "localhost"')"
+          DYN_STORAGE_ENDPOINT="$(echo "$CFG_JSON" | jq -r '.stand.storageEndpoint // "minio:9000"')"
+          DYN_PUID="$(echo "$CFG_JSON" | jq -r '.stand.puid // 1000')"
+          DYN_PGID="$(echo "$CFG_JSON" | jq -r '.stand.pgid // 100')"
+          DYN_WIN_VER="$(echo "$CFG_JSON" | jq -r '.stand.printVm.windowsVersion // "10"')"
+          DYN_WIN_RAM="$(echo "$CFG_JSON" | jq -r '.stand.printVm.ram // "4G"')"
+          DYN_WIN_CPUS="$(echo "$CFG_JSON" | jq -r '.stand.printVm.cpus // 2')"
+          DYN_WIN_DISK="$(echo "$CFG_JSON" | jq -r '.stand.printVm.disk // "40G"')"
+          DYN_USB_ARGS="$(echo "$CFG_JSON" | jq -r '.stand.printVm.usbArgs // "-device usb-host,vendorid=0x04cb,productid=0x5007"')"
+          DYN_PRINTER_NAME="$(echo "$CFG_JSON" | jq -r '.stand.printVm.printerName // ""')"
+          DYN_PAPER_W="$(echo "$CFG_JSON" | jq -r '.stand.printVm.paperWidthInches // "6.0"')"
+          DYN_PAPER_H="$(echo "$CFG_JSON" | jq -r '.stand.printVm.paperHeightInches // "4.0"')"
+          DYN_BROKER_HOST="$(echo "$CFG_JSON" | jq -r '.stand.printVm.brokerHost // "rabbitmq.stand.local"')"
+          DYN_PRINT_STORAGE="$(echo "$CFG_JSON" | jq -r '.stand.printVm.storageEndpoint // "minio.stand.local:9000"')"
+
+          # Surcharges optionnelles passées au boot iPXE
+          [ -n "$CMDLINE_PROFILES" ]         && DYN_PROFILES="$CMDLINE_PROFILES"
+          [ -n "$CMDLINE_STAND_ID" ]         && DYN_STAND_ID="$CMDLINE_STAND_ID"
+          [ -n "$CMDLINE_PRIMARY_IP" ]       && DYN_PRIMARY_IP="$CMDLINE_PRIMARY_IP"
+          [ -n "$CMDLINE_STORAGE_ENDPOINT" ] && DYN_STORAGE_ENDPOINT="$CMDLINE_STORAGE_ENDPOINT"
+
+          cat > ${lib.escapeShellArg "${infraDir}/.env"} <<EOF
+COMPOSE_PROFILES=$DYN_PROFILES
+STAND_ID=$DYN_STAND_ID
+PRIMARY_IP=$DYN_PRIMARY_IP
+STORAGE_ENDPOINT=$DYN_STORAGE_ENDPOINT
+PUID=$DYN_PUID
+PGID=$DYN_PGID
+PRINT_VM_WINDOWS_VERSION=$DYN_WIN_VER
+PRINT_VM_RAM=$DYN_WIN_RAM
+PRINT_VM_CPUS=$DYN_WIN_CPUS
+PRINT_VM_DISK=$DYN_WIN_DISK
+PRINTER_USB_ARGS=$DYN_USB_ARGS
+PRINTER_NAME=$DYN_PRINTER_NAME
+PAPER_WIDTH_INCHES=$DYN_PAPER_W
+PAPER_HEIGHT_INCHES=$DYN_PAPER_H
+PRINT_BROKER_HOST=$DYN_BROKER_HOST
+PRINT_STORAGE_ENDPOINT=$DYN_PRINT_STORAGE
+EOF
+          USE_DYNAMIC_CONFIG=true
+        else
+          echo "[sync-repos] Attention : $STAND_CFG_FILE introuvable dans $CMDLINE_REPO, repli sur la config embarquée."
+        fi
+      fi
+    ''}
+
+    if [ "$USE_DYNAMIC_CONFIG" = "false" ]; then
+      ${lib.concatStringsSep "\n" (
+        lib.mapAttrsToList (
+          name: repo:
+          "sync_one ${lib.escapeShellArg name} ${lib.escapeShellArg repo.url} ${lib.escapeShellArg repo.ref}"
+        ) cfg.repos
+      )}
+
+      # Générer le fichier .env déclaratif pour stand-infra/docker-compose.yml
+      cat > ${lib.escapeShellArg "${infraDir}/.env"} <<'EOF'
     ${envFileContent}
     EOF
+
+      ${lib.optionalString cfg.dynamicConfigFromCmdline ''
+        # Appliquer d'éventuelles surcharges noyau iPXE même sans stand.repo
+        [ -n "$CMDLINE_PROFILES" ]         && sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=$CMDLINE_PROFILES|" ${lib.escapeShellArg "${infraDir}/.env"}
+        [ -n "$CMDLINE_STAND_ID" ]         && sed -i "s|^STAND_ID=.*|STAND_ID=$CMDLINE_STAND_ID|" ${lib.escapeShellArg "${infraDir}/.env"}
+        [ -n "$CMDLINE_PRIMARY_IP" ]       && sed -i "s|^PRIMARY_IP=.*|PRIMARY_IP=$CMDLINE_PRIMARY_IP|" ${lib.escapeShellArg "${infraDir}/.env"}
+        [ -n "$CMDLINE_STORAGE_ENDPOINT" ] && sed -i "s|^STORAGE_ENDPOINT=.*|STORAGE_ENDPOINT=$CMDLINE_STORAGE_ENDPOINT|" ${lib.escapeShellArg "${infraDir}/.env"}
+      ''}
+    fi
 
     echo "[sync-repos] Tous les dépôts et .env sont prêts."
   '';
@@ -181,6 +280,12 @@ in
       type = lib.types.bool;
       default = true;
       description = "Ouvrir les ports nécessaires dans le pare-feu NixOS.";
+    };
+
+    dynamicConfigFromCmdline = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Active la lecture de stand.repo / stand.ref / stand.id / stand.primary_ip / stand.profiles depuis /proc/cmdline (mode netboot iPXE).";
     };
 
     stand = {
@@ -339,6 +444,7 @@ in
         pkgs.docker-compose
         pkgs.util-linux
         pkgs.coreutils
+        pkgs.gnugrep
       ];
 
       preStart = ''
@@ -353,9 +459,15 @@ in
           fi
         ''}
 
-        mkdir -p ${lib.escapeShellArg "${infraDir}/volumes/capture/${cfg.stand.standId}/watch"}
-        mkdir -p ${lib.escapeShellArg "${infraDir}/volumes/capture/${cfg.stand.standId}/processed"}
-        mkdir -p ${lib.escapeShellArg "${infraDir}/volumes/capture/${cfg.stand.standId}/failed"}
+        EFFECTIVE_STAND_ID=${lib.escapeShellArg cfg.stand.standId}
+        if [ -f ${lib.escapeShellArg "${infraDir}/.env"} ]; then
+          ENV_STAND_ID="$(grep -E '^STAND_ID=' ${lib.escapeShellArg "${infraDir}/.env"} | head -n1 | cut -d= -f2- || true)"
+          [ -n "$ENV_STAND_ID" ] && EFFECTIVE_STAND_ID="$ENV_STAND_ID"
+        fi
+
+        mkdir -p "${infraDir}/volumes/capture/$EFFECTIVE_STAND_ID/watch"
+        mkdir -p "${infraDir}/volumes/capture/$EFFECTIVE_STAND_ID/processed"
+        mkdir -p "${infraDir}/volumes/capture/$EFFECTIVE_STAND_ID/failed"
       '';
 
       script = ''

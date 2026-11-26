@@ -419,6 +419,47 @@ cmd_test() {
 }
 
 # ==============================================================================
+# 4. NETBOOT — Construire / servir l'image iPXE (boot réseau sans installation)
+# ==============================================================================
+cmd_netboot_build() {
+  require_cmd nix
+  info "Construction de l'image Netboot iPXE (bzImage + initrd + netboot.ipxe)..."
+  (
+    cd "$REPO_DIR"
+    nix "${NIX_FLAGS[@]}" build ".#netboot" -o result-netboot
+  )
+  success "Image iPXE construite dans $REPO_DIR/result-netboot/ :"
+  ls -lh "$REPO_DIR/result-netboot/"
+  echo ""
+  echo "Pour la servir immédiatement sur le réseau local :"
+  echo "  ./stand-ctl netboot serve [port]"
+}
+
+cmd_netboot_serve() {
+  require_cmd nix
+  local port="${1:-8000}"
+  info "Construction (si nécessaire) et démarrage du serveur HTTP iPXE sur le port $port..."
+  (
+    cd "$REPO_DIR"
+    exec nix "${NIX_FLAGS[@]}" run ".#netboot-serve" -- "$port"
+  )
+}
+
+cmd_netboot() {
+  local action="${1:-build}"
+  shift || true
+  case "$action" in
+    build) cmd_netboot_build ;;
+    serve) cmd_netboot_serve "$@" ;;
+    *)
+      error "Action netboot inconnue : '$action'"
+      echo "Actions disponibles : build | serve [port]"
+      exit 1
+      ;;
+  esac
+}
+
+# ==============================================================================
 # Aide & Menu interactif
 # ==============================================================================
 cmd_help() {
@@ -430,6 +471,7 @@ USAGE :
   ./stand-ctl install              Installe et configure le stand sur un NixOS frais
   ./stand-ctl prod [action]        Contrôle la version de production sur cette machine
   ./stand-ctl test [action]        Contrôle la version de test en VM QEMU isolée
+  ./stand-ctl netboot [action]     Construit ou sert l'image Netboot iPXE (sans installation)
   ./stand-ctl help                 Affiche cette aide
 
 ACTIONS PROD :
@@ -449,6 +491,10 @@ ACTIONS TEST (VM QEMU ISOLÉE) :
   ./stand-ctl test build           Construit la VM sans la lancer
   ./stand-ctl test ssh             Ouvre un shell SSH dans la VM (port 2222)
   ./stand-ctl test reset           Supprime le disque persistant de la VM
+
+ACTIONS NETBOOT iPXE (SANS INSTALLATION NIXOS) :
+  ./stand-ctl netboot build        Génère result-netboot/{bzImage,initrd,netboot.ipxe}
+  ./stand-ctl netboot serve [port] Sert l'image iPXE en HTTP (port 8000 par défaut)
 EOF
 }
 
@@ -462,9 +508,10 @@ cmd_menu() {
   echo "  3) Mettre à jour le stand (pull + rebuild)   (prod update)"
   echo "  4) Lancer la VM de test (console)            (test start)"
   echo "  5) Lancer la VM de test graphique (i3+FF)    (test gui)"
-  echo "  6) Statut de la production                   (prod status)"
-  echo "  7) Reconstruire la config NixOS prod         (prod rebuild)"
-  echo "  8) Réinitialiser le disque de la VM test     (test reset)"
+  echo "  6) Construire l'image Netboot iPXE           (netboot build)"
+  echo "  7) Servir l'image Netboot iPXE (HTTP :8000)  (netboot serve)"
+  echo "  8) Statut de la production                   (prod status)"
+  echo "  9) Réinitialiser le disque de la VM test     (test reset)"
   echo "  q) Quitter"
   echo ""
   read -r -p "Votre choix : " choice
@@ -474,9 +521,10 @@ cmd_menu() {
     3) cmd_prod update ;;
     4) cmd_test start ;;
     5) cmd_test gui ;;
-    6) cmd_prod status ;;
-    7) cmd_prod rebuild ;;
-    8) cmd_test reset ;;
+    6) cmd_netboot build ;;
+    7) cmd_netboot serve ;;
+    8) cmd_prod status ;;
+    9) cmd_test reset ;;
     q|Q|"") exit 0 ;;
     *)
       error "Choix invalide : $choice"
@@ -493,6 +541,7 @@ else
     install)      shift; cmd_install "$@" ;;
     prod)         shift; cmd_prod "$@" ;;
     test)         shift; cmd_test "$@" ;;
+    netboot)      shift; cmd_netboot "$@" ;;
     menu)         cmd_menu ;;
     -h|--help|help) cmd_help ;;
     *)

@@ -93,6 +93,25 @@
   };
 
   # ---------------------------------------------------------------------------
+  # Image Netboot iPXE auto-installateur (`./stand-ctl netboot build|serve`)
+  # Permet de booter un PC vierge UNE SEULE FOIS sur le réseau : l'image
+  # partitionne le disque, installe NixOS + Photo Stand (Docker, i3, Firefox)
+  # depuis le repo `stand-nixos`, puis redémarre sur le disque prêt à l'emploi.
+  # ---------------------------------------------------------------------------
+  netboot = {
+    # URL par défaut pré-remplie dans le menu iPXE (modifiable au boot en 1 touche)
+    # Exemple : "https://github.com/crobasse/stand-nixos.git"
+    repoUrl = "https://github.com/crobasse/stand-nixos.git";
+    repoRef = "main";
+    # Disque cible par défaut (ex: "/dev/nvme0n1" ou "/dev/sda" ; vide = choix interactif au boot)
+    defaultDisk = "";
+    # Si true, efface le disque cible sans demander confirmation (uniquement si defaultDisk/stand.disk est défini)
+    autoWipe = false;
+    # Délai (en secondes) du prompt iPXE pour saisir/modifier l'URL du repo
+    promptTimeoutSeconds = 8;
+  };
+
+  # ---------------------------------------------------------------------------
   # Option de test uniquement : VM QEMU (`./stand-ctl test` ou `./stand-ctl test gui`)
   # Réutilise exactement le même socle + `repos` + `standId` que le PC réel,
   # en surchargeant uniquement les paramètres nécessaires à l'isolation VM.

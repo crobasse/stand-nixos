@@ -20,6 +20,8 @@ stand-nixos/
 │   └── default.nix           # Configuration pour un PC physique NixOS frais (`nixosConfigurations.stand`)
 ├── vm/
 │   └── default.nix           # Option de test en VM QEMU (`nixosConfigurations.stand-vm`)
+├── netboot/
+│   └── default.nix           # Image Netboot iPXE en RAM (`nixosConfigurations.stand-netboot`)
 └── scripts/
     └── mock-printer.py       # Mock RabbitMQ simulant stand-print-svc sans Windows (utilisé en VM)
 ```
@@ -91,6 +93,40 @@ Contrôles i3 disponibles à tout moment (touche `Super` = touche Windows) :
 | `Super + 1..5` | Changer de workspace (le workspace 2 affiche `i3status` sans toucher à Firefox) |
 | `Super + Shift + Q` | Fermer la fenêtre active |
 | `Super + Shift + R` | Redémarrer i3 |
+
+### 5. Auto-installation en un seul Netboot iPXE (PC vierge → Stand prêt à l'emploi)
+
+Permet de démarrer un PC vierge **une seule fois** via iPXE : l'image légère (sans Xorg/Docker en RAM) partitionne automatiquement le disque (UEFI GPT ou BIOS Legacy MBR), clone `stand-nixos` dans `/etc/stand-nixos`, installe NixOS complet + Docker + i3 + Firefox, puis redémarre sur le disque local **prêt à l'emploi**.
+
+```bash
+./stand-ctl netboot build        # Génère result-netboot/{bzImage,initrd,netboot.ipxe}
+./stand-ctl netboot serve 8000   # Sert l'image en HTTP sur le réseau local
+```
+
+Sur le PC cible en iPXE (ou via serveur DHCP/PXE) :
+
+```ipxe
+chain http://<IP-SERVEUR>:8000/netboot.ipxe
+```
+
+Au démarrage iPXE, appuie sur **`c`** (ou pré-remplis `netboot.repoUrl` dans `config.nix`) pour indiquer :
+- l'**URL du dépôt `stand-nixos`** (`stand.repo=...`)
+- optionnellement : `stand.ref`, `stand.disk` (ex: `/dev/nvme0n1` ; sinon choix interactif avec liste des disques), `stand.id`, `stand.primary_ip`, `stand.profiles`, `stand.auto_wipe=1` (mode 100 % sans confirmation).
+
+Exemple en mode totalement automatisé depuis iPXE :
+
+```ipxe
+set stand_repo https://github.com/<user>/stand-nixos.git
+set stand_disk /dev/nvme0n1
+set stand_auto_wipe 1
+chain http://<IP-SERVEUR>:8000/netboot.ipxe
+```
+
+Une fois le PC redémarré sur son disque local :
+- Plus besoin de serveur iPXE : NixOS démarre i3 + Firefox en plein écran et lance les services Docker automatiquement.
+- La commande `stand-ctl` est directement disponible dans le `PATH` (ex: `stand-ctl prod update`).
+
+---
 
 #### Accès depuis ton PC hôte (mode VM)
 
