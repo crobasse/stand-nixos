@@ -3,10 +3,10 @@
 #
 # Flux :
 #   Canon R6 Mk II (USB-C PTP)
-#     ├─ Garde une copie sur la carte SD (capturetarget=1 + --keep)
-#     ├─ Configure automatiquement le mode JPEG si demandé (imageformat)
-#     └─ Télécharge chaque JPEG ->
-#          1. Copie atomique vers /var/lib/photostand/preview/ (aperçu live imv)
+#     ├─ Configure disablemodedial=0 + uilock=0 (fix BUSY sur libgphoto2 >= 2.5.31)
+#     ├─ Télécharge chaque JPEG dans /var/lib/photostand/camera-staging/
+#     └─ Hook photostand-camera-hook :
+#          1. Copie atomique vers /var/lib/photostand/preview/history/ (aperçu live imv)
 #          2. Déplacement atomique vers stand-infra/volumes/capture/<STAND_ID>/watch/
 {
   config,
@@ -23,8 +23,9 @@ let
   stagingDir = "${psCfg.dataDir}/camera-staging";
   previewDir = "${psCfg.dataDir}/preview";
   historyDir = "${previewDir}/history";
+  windowTitle = "PhotoStand Canon Preview";
 
-  # Hook appelé par `gphoto2 --capture-tethered` à chaque photo téléchargée
+  # Hook appelé par `gphoto2 --wait-event-and-download` à chaque photo téléchargée
   cameraHookScript = pkgs.writeShellApplication {
     name = "photostand-camera-hook";
     runtimeInputs = with pkgs; [
@@ -45,7 +46,7 @@ let
       BASENAME="$(basename "$ARGUMENT")"
       EXT_LOWER="$(printf '%s' "''${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
 
-      # Ne garder que les JPEG (ignorer .cr3, .mov, etc. — déjà sauvegardés sur SD via --keep)
+      # Ne garder que les JPEG (ignorer .cr3, .mov, etc.)
       if [ "$EXT_LOWER" != "jpg" ] && [ "$EXT_LOWER" != "jpeg" ]; then
         echo "[camera-hook] Fichier non-JPEG ignoré : $BASENAME"
         rm -f "$ARGUMENT"
@@ -91,7 +92,6 @@ let
 
         # Limiter l'historique d'aperçu aux N dernières photos
         if [ "$HISTORY_LIMIT" -gt 0 ]; then
-          # Supprime les plus anciens fichiers JPEG au-delà de HISTORY_LIMIT
           mapfile -t ALL_HIST < <(ls -1t "$HISTORY_DIR"/*.jpg "$HISTORY_DIR"/*.jpeg "$HISTORY_DIR"/*.JPG "$HISTORY_DIR"/*.JPEG 2>/dev/null || true)
           if [ "''${#ALL_HIST[@]}" -gt "$HISTORY_LIMIT" ]; then
             for old in "''${ALL_HIST[@]:$HISTORY_LIMIT}"; do
@@ -155,10 +155,12 @@ let
 
         # Tout exécuter dans UNE SEULE session PTP gphoto2 :
         # - disablemodedial=0 + uilock=0 EN PREMIER : corrige le bug libgphoto2 >= 2.5.31 (BUSY sur R6 Mk II)
-        # - --keep / --filename / --hook-script AVANT --wait-event-and-download (ordre obligatoire gphoto2)
+        # - %y (et non %Y) + %04n + --force-overwrite : pattern valide gphoto2 sans jamais bloquer sur stdin
+        # - --keep / --force-overwrite / --filename / --hook-script AVANT --wait-event-and-download
         # - stdbuf -oL -eL : force l'affichage temps réel dans journalctl
         COMMON_TAIL=(
-          --filename "$STAGING_DIR/%Y%m%d-%H%M%S-%f.%C"
+          --force-overwrite
+          --filename "$STAGING_DIR/%y%m%d-%H%M%S-%04n-%f.%C"
           --hook-script "${cameraHookScript}/bin/photostand-camera-hook"
           --wait-event-and-download
         )
@@ -178,9 +180,13 @@ let
 
         echo "[camera-tether] Lancement gphoto2 : ''${GPHOTO_ARGS[*]}"
         if ! stdbuf -oL -eL gphoto2 "''${GPHOTO_ARGS[@]}"; then
-          echo "[camera-tether] Session principale interrompue (code $?). Repli sur capturetarget=0 (sans imageformat) dans 2s..."
+          echo "[camera-tether] Session principale interrompue. Topologie USB actuelle :"
+          lsusb -t || true
           sleep 2
           if lsusb -d 04a9: >/dev/null 2>&1; then
+            echo "[camera-tether] Reset du port USB Canon puis repli sur capturetarget=0..."
+            gphoto2 --reset >/dev/null 2>&1 || true
+            sleep 2
             FALLBACK_ARGS=(
               --set-config disablemodedial=0
               --set-config uilock=0
@@ -215,8 +221,9 @@ let
       HISTORY_DIR=${lib.escapeShellArg historyDir}
       EVT_FILE="$PREVIEW_DIR/.latest-path"
       MODE=${lib.escapeShellArg cfg.preview.mode}
-      WINDOW_TITLE="Photo Stand — Apercu Canon"
+      WINDOW_TITLE=${lib.escapeShellArg windowTitle}
       PID_FILE="/tmp/photostand-imv.pid"
+      LOG_FILE="/tmp/photostand-preview.log"
 
       mkdir -p "$PREVIEW_DIR" "$HISTORY_DIR" 2>/dev/null || true
 
@@ -231,32 +238,32 @@ let
         if is_imv_running; then
           local pid
           pid="$(cat "$PID_FILE")"
-          imv-msg "$pid" open "$photo" >/dev/null 2>&1 || true
-          imv-msg "$pid" goto -1 >/dev/null 2>&1 || true
+          imv-msg "$pid" open "$photo" >>"$LOG_FILE" 2>&1 || true
+          imv-msg "$pid" goto -1 >>"$LOG_FILE" 2>&1 || true
         else
-          # Ouvre imv-x11 avec tout l'historique de session et saute sur la dernière photo
+          # -r requis par imv 5.x pour charger un dossier ; -n ouvre directement sur la dernière photo
           imv-x11 \
+            -r \
             -s shrink \
             -b 111318 \
             -d \
             -w "$WINDOW_TITLE" \
-            "$HISTORY_DIR" >/dev/null 2>&1 &
+            -n "$photo" \
+            "$HISTORY_DIR" >>"$LOG_FILE" 2>&1 &
           local pid=$!
           echo "$pid" > "$PID_FILE"
-          # Laisser imv ouvrir son socket IPC puis aller sur la dernière photo
-          sleep 0.4
-          imv-msg "$pid" goto -1 >/dev/null 2>&1 || true
         fi
 
         if [ "$MODE" = "popup" ]; then
-          i3-msg "[title=\"^$WINDOW_TITLE\"] focus" >/dev/null 2>&1 || true
+          sleep 0.2
+          i3-msg "[title=\"^$WINDOW_TITLE\"] focus" >>"$LOG_FILE" 2>&1 || true
         fi
       }
 
       # Si une photo existe déjà au lancement de la session, ouvrir l'aperçu si en mode workspace
       if [ "$MODE" = "workspace" ] && [ -f "$EVT_FILE" ]; then
         EXISTING="$(cat "$EVT_FILE" 2>/dev/null || true)"
-        [ -n "$EXISTING" ] && launch_or_update "$EXISTING"
+        [ -n "$EXISTING" ] && launch_or_update "$EXISTING" || true
       fi
 
       # Attente événementielle (<50ms, 0% CPU) sur chaque nouvelle photo JPEG capturée
@@ -268,9 +275,9 @@ let
         inotifywait -q -m -e moved_to,close_write --format '%f' "$PREVIEW_DIR" | while read -r fname; do
           if [ "$fname" = ".latest-path" ] && [ -f "$EVT_FILE" ]; then
             PHOTO_PATH="$(cat "$EVT_FILE" 2>/dev/null || true)"
-            [ -n "$PHOTO_PATH" ] && launch_or_update "$PHOTO_PATH"
+            [ -n "$PHOTO_PATH" ] && launch_or_update "$PHOTO_PATH" || true
           fi
-        done
+        done || true
         sleep 1
       done
     '';
@@ -287,38 +294,47 @@ let
     text = ''
       set -euo pipefail
 
+      PREVIEW_DIR=${lib.escapeShellArg previewDir}
       HISTORY_DIR=${lib.escapeShellArg historyDir}
-      WINDOW_TITLE="Photo Stand — Apercu Canon"
+      WINDOW_TITLE=${lib.escapeShellArg windowTitle}
       PID_FILE="/tmp/photostand-imv.pid"
+      LOG_FILE="/tmp/photostand-preview.log"
 
       if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-        i3-msg "[title=\"^$WINDOW_TITLE\"] focus" >/dev/null 2>&1 || true
+        i3-msg "[title=\"^$WINDOW_TITLE\"] focus" >>"$LOG_FILE" 2>&1 || true
         exit 0
       fi
 
-      if ls -1 "$HISTORY_DIR"/*.jpg "$HISTORY_DIR"/*.jpeg "$HISTORY_DIR"/*.JPG "$HISTORY_DIR"/*.JPEG >/dev/null 2>&1; then
+      LATEST="$(readlink -f "$PREVIEW_DIR/latest.jpg" 2>/dev/null || true)"
+      if [ -n "$LATEST" ] && [ -f "$LATEST" ]; then
         imv-x11 \
+          -r \
           -s shrink \
           -b 111318 \
           -d \
           -w "$WINDOW_TITLE" \
-          "$HISTORY_DIR" >/dev/null 2>&1 &
-        pid=$!
-        echo "$pid" > "$PID_FILE"
-        sleep 0.4
-        imv-msg "$pid" goto -1 >/dev/null 2>&1 || true
+          -n "$LATEST" \
+          "$HISTORY_DIR" >>"$LOG_FILE" 2>&1 &
+        echo "$!" > "$PID_FILE"
       else
         echo "Aucune photo capturée pour l'instant dans $HISTORY_DIR."
       fi
     '';
   };
 
+  # Diagnostic 100 % passif (n'appelle PAS gphoto2 --auto-detect pour ne pas perturber une session PTP active)
   cameraStatusBin = pkgs.writeShellScriptBin "stand-camera-status" ''
-    echo "=== Appareils USB détectés (gphoto2) ==="
-    ${pkgs.gphoto2}/bin/gphoto2 --auto-detect || true
+    echo "=== Boîtier Canon détecté (lsusb — passif) ==="
+    ${pkgs.usbutils}/bin/lsusb -d 04a9: || echo "(aucun boîtier Canon 04a9 détecté)"
+    echo ""
+    echo "=== Arbre USB (drivers noyau attachés) ==="
+    ${pkgs.usbutils}/bin/lsusb -t || true
     echo ""
     echo "=== Service photostand-camera-tether ==="
     systemctl --no-pager -l status photostand-camera-tether.service || true
+    echo ""
+    echo "=== Logs récents photostand-camera-tether ==="
+    journalctl -u photostand-camera-tether.service -n 15 --no-pager || true
     echo ""
     echo "=== Dernières photos reçues (${historyDir}) ==="
     ls -lht ${lib.escapeShellArg historyDir} 2>/dev/null | head -n 10 || echo "(aucune)"
@@ -390,6 +406,7 @@ in
       gphoto2
       imv
       inotify-tools
+      psmisc # fuser pour diagnostiquer les verrous USB
       cameraStatusBin
       openPreviewBin
     ];
@@ -415,6 +432,8 @@ in
 
       serviceConfig = {
         ExecStart = "${tetherDaemonScript}/bin/photostand-camera-tether";
+        KillMode = "control-group";
+        TimeoutStopSec = "5s";
         Restart = "always";
         RestartSec = "3s";
       };

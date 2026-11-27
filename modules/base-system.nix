@@ -37,6 +37,7 @@
       "networkmanager"
       "docker"
       "kvm"
+      "plugdev"
     ];
     initialPassword = "stand";
   };

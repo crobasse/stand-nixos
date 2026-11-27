@@ -168,11 +168,11 @@ let
       ${
         if psCfg.camera.preview.mode == "popup" then
           ''
-            for_window [title="^Photo Stand — Apercu Canon"] floating enable, resize set 1100 740, move position center
+            for_window [title="^PhotoStand Canon Preview"] floating enable, resize set 1100 740, move position center
           ''
         else
           ''
-            assign [title="^Photo Stand — Apercu Canon"] $ws2
+            assign [title="^PhotoStand Canon Preview"] $ws2
           ''
       }
       exec --no-startup-id ${psCfg.camera.previewWatcherBin}
