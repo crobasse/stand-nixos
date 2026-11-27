@@ -43,6 +43,8 @@ let
     PRINT_STORAGE_ENDPOINT=${cfg.stand.printVm.storageEndpoint}
   '';
 
+  staticEnvFile = pkgs.writeText "photostand.env" envFileContent;
+
   syncReposScript = pkgs.writeShellScript "photostand-sync-repos" ''
     set -euo pipefail
 
@@ -116,7 +118,8 @@ let
       CMDLINE_PROFILES=""
       CMDLINE_STORAGE_ENDPOINT=""
 
-      for token in $(cat /proc/cmdline); do
+      read -ra CMDLINE_TOKENS < /proc/cmdline
+      for token in "''${CMDLINE_TOKENS[@]}"; do
         case "$token" in
           stand.repo=*)             CMDLINE_REPO="''${token#stand.repo=}" ;;
           stand.ref=*)              CMDLINE_REF="''${token#stand.ref=}" ;;
@@ -163,24 +166,24 @@ let
           [ -n "$CMDLINE_PRIMARY_IP" ]       && DYN_PRIMARY_IP="$CMDLINE_PRIMARY_IP"
           [ -n "$CMDLINE_STORAGE_ENDPOINT" ] && DYN_STORAGE_ENDPOINT="$CMDLINE_STORAGE_ENDPOINT"
 
-          cat > ${lib.escapeShellArg "${infraDir}/.env"} <<EOF
-COMPOSE_PROFILES=$DYN_PROFILES
-STAND_ID=$DYN_STAND_ID
-PRIMARY_IP=$DYN_PRIMARY_IP
-STORAGE_ENDPOINT=$DYN_STORAGE_ENDPOINT
-PUID=$DYN_PUID
-PGID=$DYN_PGID
-PRINT_VM_WINDOWS_VERSION=$DYN_WIN_VER
-PRINT_VM_RAM=$DYN_WIN_RAM
-PRINT_VM_CPUS=$DYN_WIN_CPUS
-PRINT_VM_DISK=$DYN_WIN_DISK
-PRINTER_USB_ARGS=$DYN_USB_ARGS
-PRINTER_NAME=$DYN_PRINTER_NAME
-PAPER_WIDTH_INCHES=$DYN_PAPER_W
-PAPER_HEIGHT_INCHES=$DYN_PAPER_H
-PRINT_BROKER_HOST=$DYN_BROKER_HOST
-PRINT_STORAGE_ENDPOINT=$DYN_PRINT_STORAGE
-EOF
+          printf '%s\n' \
+            "COMPOSE_PROFILES=$DYN_PROFILES" \
+            "STAND_ID=$DYN_STAND_ID" \
+            "PRIMARY_IP=$DYN_PRIMARY_IP" \
+            "STORAGE_ENDPOINT=$DYN_STORAGE_ENDPOINT" \
+            "PUID=$DYN_PUID" \
+            "PGID=$DYN_PGID" \
+            "PRINT_VM_WINDOWS_VERSION=$DYN_WIN_VER" \
+            "PRINT_VM_RAM=$DYN_WIN_RAM" \
+            "PRINT_VM_CPUS=$DYN_WIN_CPUS" \
+            "PRINT_VM_DISK=$DYN_WIN_DISK" \
+            "PRINTER_USB_ARGS=$DYN_USB_ARGS" \
+            "PRINTER_NAME=$DYN_PRINTER_NAME" \
+            "PAPER_WIDTH_INCHES=$DYN_PAPER_W" \
+            "PAPER_HEIGHT_INCHES=$DYN_PAPER_H" \
+            "PRINT_BROKER_HOST=$DYN_BROKER_HOST" \
+            "PRINT_STORAGE_ENDPOINT=$DYN_PRINT_STORAGE" \
+            > ${lib.escapeShellArg "${infraDir}/.env"}
           USE_DYNAMIC_CONFIG=true
         else
           echo "[sync-repos] Attention : $STAND_CFG_FILE introuvable dans $CMDLINE_REPO, repli sur la config embarquée."
@@ -196,10 +199,9 @@ EOF
         ) cfg.repos
       )}
 
-      # Générer le fichier .env déclaratif pour stand-infra/docker-compose.yml
-      cat > ${lib.escapeShellArg "${infraDir}/.env"} <<'EOF'
-    ${envFileContent}
-    EOF
+      # Copier le fichier .env déclaratif pour stand-infra/docker-compose.yml
+      cp -f ${staticEnvFile} ${lib.escapeShellArg "${infraDir}/.env"}
+      chmod 0644 ${lib.escapeShellArg "${infraDir}/.env"}
 
       ${lib.optionalString cfg.dynamicConfigFromCmdline ''
         # Appliquer d'éventuelles surcharges noyau iPXE même sans stand.repo
@@ -382,8 +384,11 @@ in
       autoPrune.enable = false;
     };
 
+    environment.pathsToLink = [ "/libexec/docker/cli-plugins" ];
+
     environment.systemPackages = with pkgs; [
       docker-compose
+      docker-buildx
       git
       curl
       jq
@@ -442,6 +447,7 @@ in
       path = [
         pkgs.docker
         pkgs.docker-compose
+        pkgs.docker-buildx
         pkgs.util-linux
         pkgs.coreutils
         pkgs.gnugrep

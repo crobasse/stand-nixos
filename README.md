@@ -87,7 +87,7 @@ Contrôles i3 disponibles à tout moment (touche `Super` = touche Windows) :
 | Raccourci | Action |
 | :--- | :--- |
 | `Super + F` | Quitter / remettre le plein écran (révèle `i3status`) |
-| `Super + Entrée` | Ouvrir un terminal (`xterm`) |
+| `Super + Entrée` | Ouvrir un terminal (`alacritty`) |
 | `Super + D` | Lanceur d'applications (`dmenu`) |
 | `Super + B` | Rouvrir Firefox sur le frontend |
 | `Super + 1..5` | Changer de workspace (le workspace 2 affiche `i3status` sans toucher à Firefox) |

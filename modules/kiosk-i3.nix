@@ -162,6 +162,43 @@ let
     }
   '';
 
+  alacrittyConfig = pkgs.writeText "alacritty-photostand.toml" ''
+    [window]
+    padding = { x = 10, y = 10 }
+    decorations = "Full"
+
+    [font]
+    size = 12.0
+
+    [font.normal]
+    family = "JetBrains Mono"
+    style = "Regular"
+
+    [colors.primary]
+    background = "#111318"
+    foreground = "#f4f4f5"
+
+    [colors.normal]
+    black   = "#18181b"
+    red     = "#ef4444"
+    green   = "#22c55e"
+    yellow  = "#eab308"
+    blue    = "#3b82f6"
+    magenta = "#a855f7"
+    cyan    = "#06b6d4"
+    white   = "#e4e4e7"
+
+    [colors.bright]
+    black   = "#52525b"
+    red     = "#f87171"
+    green   = "#4ade80"
+    yellow  = "#facc15"
+    blue    = "#60a5fa"
+    magenta = "#c084fc"
+    cyan    = "#22d3ee"
+    white   = "#ffffff"
+  '';
+
   i3ConfigFile = pkgs.writeText "i3-photostand.conf" ''
     # =========================================================================
     # Configuration i3 — Photo Stand
@@ -169,7 +206,7 @@ let
     # =========================================================================
     set $mod Mod4
 
-    font pango:DejaVu Sans Mono 10
+    font pango:JetBrains Mono 10
     floating_modifier $mod
 
     # Désactiver la mise en veille / extinction d'écran sur le stand
@@ -184,8 +221,8 @@ let
     # Basculer le plein écran (permet d'afficher/cacher i3status à tout moment)
     bindsym $mod+f fullscreen toggle
 
-    # Ouvrir un terminal
-    bindsym $mod+Return exec ${pkgs.xterm}/bin/xterm -fa 'Monospace' -fs 11
+    # Ouvrir un terminal (Alacritty)
+    bindsym $mod+Return exec ${pkgs.alacritty}/bin/alacritty --config-file ${alacrittyConfig}
 
     # Lanceur d'applications (dmenu)
     bindsym $mod+d exec --no-startup-id ${pkgs.dmenu}/bin/dmenu_run
@@ -272,6 +309,15 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # OpenGL/Mesa (incluant llvmpipe en VM) requis par Alacritty et Firefox
+    hardware.graphics.enable = true;
+
+    # Polices lisibles pour Alacritty, i3, i3status et Firefox
+    fonts.packages = with pkgs; [
+      jetbrains-mono
+      dejavu_fonts
+    ];
+
     services.xserver = {
       enable = true;
       xkb.layout = cfg.keymap;
@@ -284,7 +330,7 @@ in
         extraPackages = with pkgs; [
           i3status
           dmenu
-          xterm
+          alacritty
         ];
       };
     };
