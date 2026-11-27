@@ -386,9 +386,21 @@ in
     virtualisation.docker = {
       enable = true;
       autoPrune.enable = false;
+      daemon.settings = {
+        features = {
+          buildkit = true;
+        };
+      };
     };
 
     environment.pathsToLink = [ "/libexec/docker/cli-plugins" ];
+
+    # Expose docker-buildx et docker-compose dans le chemin standard scanné par Docker CLI / Compose
+    systemd.tmpfiles.rules = [
+      "d /usr/local/lib/docker/cli-plugins 0755 root root -"
+      "L+ /usr/local/lib/docker/cli-plugins/docker-buildx - - - - ${pkgs.docker-buildx}/libexec/docker/cli-plugins/docker-buildx"
+      "L+ /usr/local/lib/docker/cli-plugins/docker-compose - - - - ${pkgs.docker-compose}/libexec/docker/cli-plugins/docker-compose"
+    ];
 
     environment.systemPackages = with pkgs; [
       docker-compose
@@ -446,6 +458,7 @@ in
       environment = {
         DOCKER_BUILDKIT = "1";
         COMPOSE_DOCKER_CLI_BUILD = "1";
+        DOCKER_CONFIG = "${cfg.dataDir}/.docker";
       };
 
       path = [
@@ -458,6 +471,10 @@ in
       ];
 
       preStart = ''
+        mkdir -p ${lib.escapeShellArg "${cfg.dataDir}/.docker/cli-plugins"}
+        ln -sfn ${pkgs.docker-buildx}/libexec/docker/cli-plugins/docker-buildx ${lib.escapeShellArg "${cfg.dataDir}/.docker/cli-plugins/docker-buildx"}
+        ln -sfn ${pkgs.docker-compose}/libexec/docker/cli-plugins/docker-compose ${lib.escapeShellArg "${cfg.dataDir}/.docker/cli-plugins/docker-compose"}
+
         for i in $(seq 1 30); do
           if docker info >/dev/null 2>&1; then
             break
@@ -490,12 +507,12 @@ in
 
       script = ''
         cd ${lib.escapeShellArg infraDir}
-        docker-compose --env-file .env up -d --build --remove-orphans
+        docker compose --env-file .env up -d --build --remove-orphans
       '';
 
       preStop = ''
         cd ${lib.escapeShellArg infraDir}
-        docker-compose --env-file .env down
+        docker compose --env-file .env down
       '';
 
       serviceConfig = {
