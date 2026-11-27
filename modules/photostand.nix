@@ -61,6 +61,10 @@ let
       ]
     }:$PATH"
 
+    export GIT_CONFIG_COUNT=1
+    export GIT_CONFIG_KEY_0="safe.directory"
+    export GIT_CONFIG_VALUE_0="*"
+
     ${lib.optionalString (cfg.gitSshKeyFile != null) ''
       export GIT_SSH_COMMAND="ssh -i ${lib.escapeShellArg cfg.gitSshKeyFile} -o StrictHostKeyChecking=accept-new"
     ''}
@@ -454,6 +458,14 @@ in
       ];
 
       preStart = ''
+        for i in $(seq 1 30); do
+          if docker info >/dev/null 2>&1; then
+            break
+          fi
+          echo "[photostand-compose] Attente du daemon Docker ($i/30)..."
+          sleep 1
+        done
+
         mkdir -p ${lib.escapeShellArg "${infraDir}/volumes/db"}
         mkdir -p ${lib.escapeShellArg "${infraDir}/volumes/capture"}
 

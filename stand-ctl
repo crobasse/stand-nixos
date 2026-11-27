@@ -244,9 +244,19 @@ cmd_prod_rebuild() {
   info "Application de la configuration NixOS de production (.#stand)..."
   (
     cd "$REPO_DIR"
-    sudo nixos-rebuild switch --flake ".#stand" "${NIX_FLAGS[@]}"
+    sudo NIX_CONFIG="experimental-features = nix-command flakes" nixos-rebuild switch --flake ".#stand"
   )
   success "Configuration NixOS de production appliquée et démarrée."
+}
+
+cmd_prod_post_update() {
+  cmd_prod_rebuild
+
+  info "Synchronisation des dépôts de services et mise à jour Docker Compose..."
+  sudo systemctl restart photostand-sync-repos.service
+  sudo systemctl restart photostand-compose.service
+  success "Stand entièrement mis à jour et redémarré."
+  cmd_prod_status
 }
 
 cmd_prod_update() {
@@ -269,13 +279,8 @@ cmd_prod_update() {
     exit 1
   fi
 
-  cmd_prod_rebuild
-
-  info "Synchronisation des dépôts de services et mise à jour Docker Compose..."
-  sudo systemctl restart photostand-sync-repos.service
-  sudo systemctl restart photostand-compose.service
-  success "Stand entièrement mis à jour et redémarré."
-  cmd_prod_status
+  # Ré-exécute la version fraîchement pullée de stand-ctl pour la suite
+  exec "$REPO_DIR/stand-ctl" prod _post-update
 }
 
 cmd_prod_ensure_installed() {
@@ -336,13 +341,14 @@ cmd_prod() {
   local action="${1:-start}"
   shift || true
   case "$action" in
-    start)   cmd_prod_start ;;
-    stop)    cmd_prod_stop ;;
-    restart) cmd_prod_restart ;;
-    status)  cmd_prod_status ;;
-    logs)    cmd_prod_logs "$@" ;;
-    rebuild) cmd_prod_rebuild ;;
-    update)  cmd_prod_update ;;
+    start)        cmd_prod_start ;;
+    stop)         cmd_prod_stop ;;
+    restart)      cmd_prod_restart ;;
+    status)       cmd_prod_status ;;
+    logs)         cmd_prod_logs "$@" ;;
+    rebuild)      cmd_prod_rebuild ;;
+    update)       cmd_prod_update ;;
+    _post-update) cmd_prod_post_update ;;
     *)
       error "Action prod inconnue : '$action'"
       echo "Actions disponibles : start | stop | restart | status | logs [service] | rebuild | update"
