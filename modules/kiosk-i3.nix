@@ -24,89 +24,22 @@ let
     else
       "http://${psCfg.stand.primaryIp}";
 
-  frontendUrl = if cfg.url != null then cfg.url else defaultFrontendUrl;
+  defaultApiUrl =
+    if lib.elem "primary" psCfg.stand.composeProfiles then
+      "http://127.0.0.1:8080"
+    else
+      "http://${psCfg.stand.primaryIp}:8080";
 
-  # Page d'attente locale affichée uniquement si le frontend n'est pas encore prêt au boot.
-  # Vérifie toutes les 2 secondes et redirige automatiquement dès que Nginx répond.
-  waitingPage = pkgs.writeText "photostand-waiting.html" ''
-    <!doctype html>
-    <html lang="fr">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Photo Stand — Démarrage...</title>
-        <style>
-          body {
-            margin: 0;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: #111318;
-            color: #f4f4f5;
-            font-family: system-ui, -apple-system, sans-serif;
-            text-align: center;
-          }
-          .spinner {
-            width: 44px;
-            height: 44px;
-            border: 4px solid #27272a;
-            border-top-color: #f4f4f5;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-bottom: 20px;
-          }
-          @keyframes spin { to { transform: rotate(360deg); } }
-          p { color: #a1a1aa; margin: 6px 0; }
-          a {
-            margin-top: 18px;
-            padding: 10px 18px;
-            border-radius: 8px;
-            background: #27272a;
-            color: #f4f4f5;
-            text-decoration: none;
-            font-size: 14px;
-          }
-          .hint {
-            position: fixed;
-            bottom: 16px;
-            font-size: 12px;
-            color: #71717a;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="spinner"></div>
-        <h1>Photo Stand</h1>
-        <p id="status">Démarrage des services en cours...</p>
-        <p id="target-label">Cible : ${frontendUrl}</p>
-        <a id="open-link" href="${frontendUrl}">Ouvrir maintenant</a>
-        <div class="hint">i3 : Super+F (quitter plein écran / voir i3status) · Super+Entrée (terminal) · Super+D (applications)</div>
-        <script>
-          const params = new URLSearchParams(window.location.search);
-          const target = params.get("target") || ${builtins.toJSON frontendUrl};
-          document.getElementById("target-label").textContent = "Cible : " + target;
-          document.getElementById("open-link").href = target;
-          async function check() {
-            try {
-              await fetch(target, { mode: "no-cors", cache: "no-store" });
-              window.location.replace(target);
-            } catch (_) {
-              setTimeout(check, 2000);
-            }
-          }
-          check();
-        </script>
-      </body>
-    </html>
-  '';
+  frontendUrl = if cfg.url != null then cfg.url else defaultFrontendUrl;
+  bootStatusUrl = "http://127.0.0.1:8888";
 
   launchFrontendScript = pkgs.writeShellScript "photostand-launch-frontend" ''
     TARGET=${lib.escapeShellArg frontendUrl}
+    API_URL=${lib.escapeShellArg defaultApiUrl}
     CMDLINE_PROFILES=""
     CMDLINE_PRIMARY_IP=""
-    for token in $(cat /proc/cmdline); do
+    read -ra CMDLINE_TOKENS < /proc/cmdline
+    for token in "''${CMDLINE_TOKENS[@]}"; do
       case "$token" in
         stand.profiles=*)   CMDLINE_PROFILES="''${token#stand.profiles=}" ;;
         stand.primary_ip=*) CMDLINE_PRIMARY_IP="''${token#stand.primary_ip=}" ;;
@@ -114,11 +47,24 @@ let
     done
     if [ -n "$CMDLINE_PROFILES" ] && [[ ",$CMDLINE_PROFILES," != *",primary,"* ]] && [ -n "$CMDLINE_PRIMARY_IP" ]; then
       TARGET="http://$CMDLINE_PRIMARY_IP"
+      API_URL="http://$CMDLINE_PRIMARY_IP:8080"
     fi
-    if ${pkgs.curl}/bin/curl -fsS --max-time 2 "$TARGET" >/dev/null 2>&1; then
+
+    # N'ouvrir directement le frontend que si Nginx ET job-svc (/health + /photos) répondent 200.
+    # Sinon, ouvrir la page de statut temps réel (127.0.0.1:8888) qui redirigera automatiquement dès que tout est prêt.
+    if ${pkgs.curl}/bin/curl -fsS --max-time 2 "$TARGET" >/dev/null 2>&1 \
+       && ${pkgs.curl}/bin/curl -fsS --max-time 2 "$API_URL/health" >/dev/null 2>&1 \
+       && ${pkgs.curl}/bin/curl -fsS --max-time 2 "$API_URL/photos?limit=1" >/dev/null 2>&1; then
       exec ${pkgs.firefox}/bin/firefox --new-window "$TARGET"
     else
-      exec ${pkgs.firefox}/bin/firefox --new-window "file://${waitingPage}?target=$TARGET"
+      # Attendre brièvement que le serveur local de statut (port 8888) réponde
+      for _ in {1..15}; do
+        if ${pkgs.curl}/bin/curl -fsS --max-time 1 ${lib.escapeShellArg bootStatusUrl} >/dev/null 2>&1; then
+          break
+        fi
+        sleep 0.5
+      done
+      exec ${pkgs.firefox}/bin/firefox --new-window ${lib.escapeShellArg bootStatusUrl}
     fi
   '';
 
@@ -360,6 +306,32 @@ in
       autoLogin = {
         enable = true;
         user = cfg.user;
+      };
+    };
+
+    # Serveur local temps réel de l'écran de démarrage (127.0.0.1:8888)
+    systemd.services.photostand-boot-status = {
+      description = "Page de statut en temps réel du démarrage Photo Stand (127.0.0.1:8888)";
+      before = [ "display-manager.service" ];
+      wantedBy = [ "multi-user.target" ];
+
+      path = [
+        pkgs.systemd
+        pkgs.docker
+      ];
+
+      environment = {
+        PYTHONUNBUFFERED = "1";
+        BOOT_STATUS_HOST = "127.0.0.1";
+        BOOT_STATUS_PORT = "8888";
+        FRONTEND_URL = frontendUrl;
+        API_URL = defaultApiUrl;
+      };
+
+      serviceConfig = {
+        ExecStart = "${pkgs.python3}/bin/python3 ${../scripts/boot-status-server.py}";
+        Restart = "always";
+        RestartSec = "2s";
       };
     };
 
