@@ -12,17 +12,24 @@
 
 set -euo pipefail
 
-# Résolution du dossier du dépôt stand-nixos (même si appelé via `nix run`)
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ORIG_ARGS=("$@")
+
+# Résolution du dossier du dépôt stand-nixos (exécutable depuis n'importe où)
 if [ -n "${STAND_NIXOS_DIR:-}" ]; then
   REPO_DIR="$STAND_NIXOS_DIR"
 else
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [ -f "$SCRIPT_DIR/flake.nix" ] && [ -w "$SCRIPT_DIR" ]; then
-    REPO_DIR="$SCRIPT_DIR"
-  elif [ -f "$PWD/flake.nix" ] && [ -f "$PWD/config.nix" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
+  if [ -f "$PWD/flake.nix" ] && [ -f "$PWD/config.nix" ]; then
     REPO_DIR="$PWD"
-  else
+  elif [ -f "$SCRIPT_DIR/flake.nix" ] && [ -f "$SCRIPT_DIR/config.nix" ] && [ -w "$SCRIPT_DIR" ]; then
     REPO_DIR="$SCRIPT_DIR"
+  elif [ -f "/etc/stand-nixos/flake.nix" ]; then
+    REPO_DIR="/etc/stand-nixos"
+  elif [ -f "$SCRIPT_DIR/flake.nix" ]; then
+    REPO_DIR="$SCRIPT_DIR"
+  else
+    REPO_DIR="/etc/stand-nixos"
   fi
 fi
 
@@ -48,6 +55,18 @@ success() { echo -e "${GREEN}[stand-ctl]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[stand-ctl]${NC} $*"; }
 error()   { echo -e "${RED}[stand-ctl] Erreur :${NC} $*" >&2; }
 
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+git_repo() {
+  git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" "$@"
+}
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     error "Commande requise introuvable : '$1'."
@@ -56,9 +75,21 @@ require_cmd() {
 }
 
 require_writable_repo() {
-  if [ ! -f "$REPO_DIR/flake.nix" ] || [ ! -w "$REPO_DIR" ]; then
-    error "Exécutez cette commande depuis le dépôt cloné stand-nixos (dossier actuel : $REPO_DIR)."
+  if [ ! -f "$REPO_DIR/flake.nix" ]; then
+    error "Dépôt stand-nixos introuvable (cherché dans : $REPO_DIR). Définissez STAND_NIXOS_DIR=/chemin/vers/stand-nixos."
     exit 1
+  fi
+
+  # Si le dépôt existe (ex: /etc/stand-nixos appartenant à root) mais n'est pas
+  # modifiable par l'utilisateur courant, on élève automatiquement via sudo.
+  if [ ! -w "$REPO_DIR" ]; then
+    if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+      info "Droits root requis pour modifier $REPO_DIR — élévation via sudo..."
+      exec sudo env STAND_NIXOS_DIR="$REPO_DIR" bash "$SELF_PATH" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
+    else
+      error "Le dépôt $REPO_DIR n'est pas accessible en écriture."
+      exit 1
+    fi
   fi
 }
 
@@ -69,7 +100,7 @@ stage_local_files_if_git() {
     [ -f "$REPO_DIR/host/hardware-configuration.nix" ] && to_add+=("host/hardware-configuration.nix")
     [ -f "$REPO_DIR/local.nix" ] && to_add+=("local.nix")
     if [ ${#to_add[@]} -gt 0 ]; then
-      git -C "$REPO_DIR" add -f "${to_add[@]}"
+      git_repo add -f "${to_add[@]}"
     fi
   fi
 }
@@ -236,15 +267,15 @@ cmd_prod_rebuild() {
   require_cmd nixos-rebuild
 
   if [ ! -f "$REPO_DIR/host/hardware-configuration.nix" ]; then
-    error "host/hardware-configuration.nix est absent. Lancez d'abord : ./stand-ctl install"
+    error "host/hardware-configuration.nix est absent. Lancez d'abord : stand-ctl install"
     exit 1
   fi
 
   stage_local_files_if_git
-  info "Application de la configuration NixOS de production (.#stand)..."
+  info "Application de la configuration NixOS de production ($REPO_DIR#stand)..."
   (
     cd "$REPO_DIR"
-    sudo NIX_CONFIG="experimental-features = nix-command flakes" nixos-rebuild switch --flake ".#stand"
+    run_root env NIX_CONFIG="experimental-features = nix-command flakes" nixos-rebuild switch --flake ".#stand"
   )
   success "Configuration NixOS de production appliquée et démarrée."
 }
@@ -253,8 +284,8 @@ cmd_prod_post_update() {
   cmd_prod_rebuild
 
   info "Synchronisation des dépôts de services et mise à jour Docker Compose..."
-  sudo systemctl restart photostand-sync-repos.service
-  sudo systemctl restart photostand-compose.service
+  run_root systemctl restart photostand-sync-repos.service
+  run_root systemctl restart photostand-compose.service
   success "Stand entièrement mis à jour et redémarré."
   cmd_prod_status
 }
@@ -269,18 +300,18 @@ cmd_prod_update() {
     exit 1
   fi
 
-  info "Récupération des dernières modifications de stand-nixos (git pull --ff-only)..."
+  info "Récupération des dernières modifications de stand-nixos ($REPO_DIR)..."
   # Dé-stage temporairement les fichiers locaux pour éviter tout blocage (ex: pull.rebase=true)
-  git -C "$REPO_DIR" reset -q HEAD -- host/hardware-configuration.nix local.nix 2>/dev/null || true
+  git_repo reset -q HEAD -- host/hardware-configuration.nix local.nix 2>/dev/null || true
 
-  if ! git -C "$REPO_DIR" pull --ff-only; then
+  if ! git_repo pull --ff-only; then
     stage_local_files_if_git
     error "git pull --ff-only a échoué. Vérifiez l'état Git du dépôt : git -C $REPO_DIR status"
     exit 1
   fi
 
   # Ré-exécute la version fraîchement pullée de stand-ctl pour la suite
-  exec "$REPO_DIR/stand-ctl" prod _post-update
+  exec env STAND_NIXOS_DIR="$REPO_DIR" bash "$REPO_DIR/stand-ctl" prod _post-update
 }
 
 cmd_prod_ensure_installed() {
@@ -288,8 +319,8 @@ cmd_prod_ensure_installed() {
      ! systemctl list-unit-files photostand-compose.service | grep -q photostand-compose.service; then
     warn "Le service de production Photo Stand n'est pas encore installé sur cette machine NixOS."
     echo "Lancez d'abord :"
-    echo "  ./stand-ctl install        # pour une installation fraîche"
-    echo "  ./stand-ctl prod rebuild   # si hardware-configuration.nix est déjà prêt"
+    echo "  stand-ctl install        # pour une installation fraîche"
+    echo "  stand-ctl prod rebuild   # si hardware-configuration.nix est déjà prêt"
     exit 1
   fi
 }
@@ -297,8 +328,8 @@ cmd_prod_ensure_installed() {
 cmd_prod_start() {
   cmd_prod_ensure_installed
   info "Synchronisation des dépôts et démarrage de la stack de production..."
-  sudo systemctl start photostand-sync-repos.service
-  sudo systemctl start photostand-compose.service
+  run_root systemctl start photostand-sync-repos.service
+  run_root systemctl start photostand-compose.service
   success "Stack de production démarrée."
   cmd_prod_status
 }
@@ -306,15 +337,15 @@ cmd_prod_start() {
 cmd_prod_stop() {
   cmd_prod_ensure_installed
   info "Arrêt de la stack de production..."
-  sudo systemctl stop photostand-compose.service
+  run_root systemctl stop photostand-compose.service
   success "Stack de production arrêtée."
 }
 
 cmd_prod_restart() {
   cmd_prod_ensure_installed
   info "Re-synchronisation Git et redémarrage de la stack de production..."
-  sudo systemctl restart photostand-sync-repos.service
-  sudo systemctl restart photostand-compose.service
+  run_root systemctl restart photostand-sync-repos.service
+  run_root systemctl restart photostand-compose.service
   success "Stack de production redémarrée."
   cmd_prod_status
 }
@@ -322,7 +353,7 @@ cmd_prod_restart() {
 cmd_prod_status() {
   cmd_prod_ensure_installed
   if command -v stand-status >/dev/null 2>&1; then
-    sudo stand-status
+    run_root stand-status
   else
     systemctl --no-pager -l status photostand-sync-repos.service photostand-compose.service || true
   fi
@@ -331,7 +362,7 @@ cmd_prod_status() {
 cmd_prod_logs() {
   cmd_prod_ensure_installed
   if command -v stand-logs >/dev/null 2>&1; then
-    sudo stand-logs "$@"
+    run_root stand-logs "$@"
   else
     journalctl -u photostand-compose.service -f
   fi

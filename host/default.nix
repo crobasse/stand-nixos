@@ -16,9 +16,16 @@ let
   grubDevice = installCfg.grubDevice or "nodev";
 
   standCtlWrapper = pkgs.writeShellScriptBin "stand-ctl" ''
-    export STAND_NIXOS_DIR="''${STAND_NIXOS_DIR:-/etc/stand-nixos}"
-    if [ -x "$STAND_NIXOS_DIR/stand-ctl" ]; then
-      exec "$STAND_NIXOS_DIR/stand-ctl" "$@"
+    if [ -z "''${STAND_NIXOS_DIR:-}" ]; then
+      if [ -f "$PWD/flake.nix" ] && [ -f "$PWD/config.nix" ]; then
+        export STAND_NIXOS_DIR="$PWD"
+      elif [ -f "/etc/stand-nixos/flake.nix" ]; then
+        export STAND_NIXOS_DIR="/etc/stand-nixos"
+      fi
+    fi
+
+    if [ -n "''${STAND_NIXOS_DIR:-}" ] && [ -f "$STAND_NIXOS_DIR/stand-ctl" ]; then
+      exec ${pkgs.bash}/bin/bash "$STAND_NIXOS_DIR/stand-ctl" "$@"
     else
       exec ${pkgs.bash}/bin/bash ${../stand-ctl} "$@"
     fi
