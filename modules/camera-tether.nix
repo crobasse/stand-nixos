@@ -125,13 +125,14 @@ let
       STAGING_DIR=${lib.escapeShellArg stagingDir}
       PREVIEW_DIR=${lib.escapeShellArg previewDir}
       HISTORY_DIR=${lib.escapeShellArg historyDir}
+      CAPTURE_TARGET=${lib.escapeShellArg cfg.captureTarget}
       KEEP_ON_SD="${lib.boolToString cfg.keepOnSdCard}"
       WANTED_FORMAT=${lib.escapeShellArg (if cfg.imageFormat != null then cfg.imageFormat else "")}
 
       mkdir -p "$STAGING_DIR" "$PREVIEW_DIR" "$HISTORY_DIR"
       chmod 0755 "$PREVIEW_DIR" "$HISTORY_DIR"
 
-      echo "[camera-tether] Service démarré. En attente d'un boîtier Canon en USB-C..."
+      echo "[camera-tether] Service démarré (captureTarget=$CAPTURE_TARGET). En attente d'un boîtier Canon en USB-C..."
       WAS_WAITING=0
 
       while true; do
@@ -153,43 +154,41 @@ let
         echo "[camera-tether] Boîtier Canon détecté : $(lsusb -d 04a9: | head -n1)"
 
         # Tout exécuter dans UNE SEULE session PTP gphoto2 :
-        # - disablemodedial=0 : corrige le bug libgphoto2 >= 2.5.31 (issue #1210) qui envoie
-        #   SetModeDialDisable(1) au Canon EOS R6 Mark II et affiche "BUSY" sur le boîtier.
-        # - uilock=0 + --wait-event-and-download : garde le déclencheur physique libre.
-        GPHOTO_ARGS=()
+        # - disablemodedial=0 + uilock=0 EN PREMIER : corrige le bug libgphoto2 >= 2.5.31 (BUSY sur R6 Mk II)
+        # - --keep / --filename / --hook-script AVANT --wait-event-and-download (ordre obligatoire gphoto2)
+        # - stdbuf -oL -eL : force l'affichage temps réel dans journalctl
+        COMMON_TAIL=(
+          --filename "$STAGING_DIR/%Y%m%d-%H%M%S-%f.%C"
+          --hook-script "${cameraHookScript}/bin/photostand-camera-hook"
+          --wait-event-and-download
+        )
         if [ "$KEEP_ON_SD" = "true" ]; then
-          GPHOTO_ARGS+=(--set-config capturetarget=1)
+          COMMON_TAIL=(--keep "''${COMMON_TAIL[@]}")
         fi
+
+        GPHOTO_ARGS=(
+          --set-config disablemodedial=0
+          --set-config uilock=0
+          --set-config "capturetarget=$CAPTURE_TARGET"
+        )
         if [ -n "$WANTED_FORMAT" ]; then
           GPHOTO_ARGS+=(--set-config-value "/main/imgsettings/imageformat=$WANTED_FORMAT")
         fi
-        GPHOTO_ARGS+=(
-          --set-config disablemodedial=0
-          --set-config uilock=0
-          --wait-event-and-download
-          --filename "$STAGING_DIR/%Y%m%d-%H%M%S-%f.%C"
-          --hook-script "${cameraHookScript}/bin/photostand-camera-hook"
-        )
-        if [ "$KEEP_ON_SD" = "true" ]; then
-          GPHOTO_ARGS+=(--keep)
-        fi
+        GPHOTO_ARGS+=("''${COMMON_TAIL[@]}")
 
-        echo "[camera-tether] Ouverture session PTP (disablemodedial=0 + écoute déclenchements)..."
-        if ! gphoto2 "''${GPHOTO_ARGS[@]}"; then
-          echo "[camera-tether] Session gphoto2 interrompue (code $?). Repli sans imageformat/uilock dans 3s si boîtier toujours présent..."
-          sleep 3
+        echo "[camera-tether] Lancement gphoto2 : ''${GPHOTO_ARGS[*]}"
+        if ! stdbuf -oL -eL gphoto2 "''${GPHOTO_ARGS[@]}"; then
+          echo "[camera-tether] Session principale interrompue (code $?). Repli sur capturetarget=0 (sans imageformat) dans 2s..."
+          sleep 2
           if lsusb -d 04a9: >/dev/null 2>&1; then
             FALLBACK_ARGS=(
               --set-config disablemodedial=0
-              --wait-event-and-download
-              --filename "$STAGING_DIR/%Y%m%d-%H%M%S-%f.%C"
-              --hook-script "${cameraHookScript}/bin/photostand-camera-hook"
+              --set-config uilock=0
+              --set-config capturetarget=0
+              "''${COMMON_TAIL[@]}"
             )
-            if [ "$KEEP_ON_SD" = "true" ]; then
-              FALLBACK_ARGS=(--set-config capturetarget=1 --keep "''${FALLBACK_ARGS[@]}")
-            fi
-            echo "[camera-tether] Relance en mode écoute simple (disablemodedial=0)..."
-            gphoto2 "''${FALLBACK_ARGS[@]}" || true
+            echo "[camera-tether] Relance fallback : ''${FALLBACK_ARGS[*]}"
+            stdbuf -oL -eL gphoto2 "''${FALLBACK_ARGS[@]}" || true
           fi
         fi
 
@@ -329,16 +328,27 @@ in
   options.services.photostand.camera = {
     enable = lib.mkEnableOption "Tethering USB-C appareil photo Canon (gphoto2) + aperçu instantané hors-frontend";
 
+    captureTarget = lib.mkOption {
+      type = lib.types.str;
+      default = "0";
+      description = ''
+        Cible de capture gphoto2 :
+        - "0" ("Internal RAM") : téléchargement instantané vers le PC (recommandé sur Canon R6 Mark II)
+        - "card+sdram" : enregistre sur la carte SD ET télécharge vers le PC (si supporté par le boîtier)
+        - "1" ("Memory card") : enregistre sur la carte SD
+      '';
+    };
+
     keepOnSdCard = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Active capturetarget=1 (carte SD) et --keep pour conserver toutes les photos sur la carte SD du boîtier.";
+      description = "Passe --keep à gphoto2 pour ne pas supprimer les fichiers présents sur la carte SD.";
     };
 
     imageFormat = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = "Large Fine JPEG";
-      description = "Format image configuré automatiquement au branchement via /main/imgsettings/imageformat (null pour ne pas modifier le réglage du boîtier).";
+      default = null;
+      description = "Format image optionnel configuré au branchement via /main/imgsettings/imageformat (ex: \"Large Fine JPEG\", null pour laisser le réglage du boîtier).";
     };
 
     preview = {

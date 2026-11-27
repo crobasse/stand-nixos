@@ -286,6 +286,9 @@ cmd_prod_post_update() {
   info "Synchronisation des dépôts de services et mise à jour Docker Compose..."
   run_root systemctl restart photostand-sync-repos.service
   run_root systemctl restart photostand-compose.service
+  if systemctl list-unit-files photostand-camera-tether.service 2>/dev/null | grep -q photostand-camera-tether.service; then
+    run_root systemctl restart photostand-camera-tether.service || true
+  fi
   success "Stand entièrement mis à jour et redémarré."
   cmd_prod_status
 }

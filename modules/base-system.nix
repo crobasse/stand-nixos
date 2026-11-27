@@ -60,6 +60,7 @@
     # Tethering USB-C Canon EOS R6 Mk II + aperçu instantané hors-frontend
     camera = {
       enable = lib.mkDefault standConfig.camera.enable;
+      captureTarget = lib.mkDefault (standConfig.camera.captureTarget or "0");
       keepOnSdCard = lib.mkDefault standConfig.camera.keepOnSdCard;
       imageFormat = lib.mkDefault standConfig.camera.imageFormat;
       preview = {

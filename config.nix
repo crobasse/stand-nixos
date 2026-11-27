@@ -98,10 +98,14 @@
   # ---------------------------------------------------------------------------
   camera = {
     enable = true;
-    # Conserve toutes les photos sur la carte SD du boîtier (capturetarget=1 + --keep)
+    # "0" (Internal RAM) : téléchargement instantané vers le PC (fiable sur Canon R6 Mark II)
+    # "card+sdram"       : enregistre sur SD + télécharge vers le PC (si supporté par le boîtier)
+    # "1" (Memory card)  : enregistre sur SD uniquement sur certains firmwares R6 Mk II
+    captureTarget = "0";
+    # Passe --keep à gphoto2 pour ne pas supprimer les fichiers de la carte SD
     keepOnSdCard = true;
-    # Force automatiquement le boîtier en JPEG au branchement (null pour ne pas toucher au boîtier)
-    imageFormat = "Large Fine JPEG";
+    # Format image forcé au branchement (ex: "Large Fine JPEG", ou null pour garder le réglage du boîtier)
+    imageFormat = null;
 
     preview = {
       enable = true;
