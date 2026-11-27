@@ -93,6 +93,27 @@
   };
 
   # ---------------------------------------------------------------------------
+  # Tethering appareil photo Canon EOS R6 Mark II (USB-C / gphoto2)
+  # + Aperçu instantané hors-frontend (imv, style Canon EOS Utility)
+  # ---------------------------------------------------------------------------
+  camera = {
+    enable = true;
+    # Conserve toutes les photos sur la carte SD du boîtier (capturetarget=1 + --keep)
+    keepOnSdCard = true;
+    # Force automatiquement le boîtier en JPEG au branchement (null pour ne pas toucher au boîtier)
+    imageFormat = "Large Fine JPEG";
+
+    preview = {
+      enable = true;
+      # "workspace" : fenêtre d'aperçu imv sur le workspace 2:Apercu (Super+2 / Super+P, ou 2e écran)
+      # "popup"     : fenêtre flottante ramenée au premier plan à chaque photo prise
+      mode = "workspace";
+      # Nombre de derniers JPEG conservés dans l'historique d'aperçu local (navigation flèches Gauche/Droite)
+      historyLimit = 100;
+    };
+  };
+
+  # ---------------------------------------------------------------------------
   # Image Netboot iPXE auto-installateur (`./stand-ctl netboot build|serve`)
   # Permet de booter un PC vierge UNE SEULE FOIS sur le réseau : l'image
   # partitionne le disque, installe NixOS + Photo Stand (Docker, i3, Firefox)

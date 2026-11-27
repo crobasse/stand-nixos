@@ -261,6 +261,7 @@
       nixosModules = {
         photostand = ./modules/photostand.nix;
         kiosk-i3 = ./modules/kiosk-i3.nix;
+        camera-tether = ./modules/camera-tether.nix;
         base-system = ./modules/base-system.nix;
         default = self.nixosModules.photostand;
       };

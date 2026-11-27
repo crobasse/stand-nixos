@@ -13,6 +13,7 @@
   imports = [
     ./photostand.nix
     ./kiosk-i3.nix
+    ./camera-tether.nix
   ];
 
   system.stateVersion = lib.mkDefault "24.11";
@@ -54,6 +55,18 @@
       enable = lib.mkDefault standConfig.kiosk.enable;
       user = lib.mkDefault "stand";
       keymap = lib.mkDefault standConfig.kiosk.keymap;
+    };
+
+    # Tethering USB-C Canon EOS R6 Mk II + aperçu instantané hors-frontend
+    camera = {
+      enable = lib.mkDefault standConfig.camera.enable;
+      keepOnSdCard = lib.mkDefault standConfig.camera.keepOnSdCard;
+      imageFormat = lib.mkDefault standConfig.camera.imageFormat;
+      preview = {
+        enable = lib.mkDefault standConfig.camera.preview.enable;
+        mode = lib.mkDefault standConfig.camera.preview.mode;
+        historyLimit = lib.mkDefault standConfig.camera.preview.historyLimit;
+      };
     };
   };
 }

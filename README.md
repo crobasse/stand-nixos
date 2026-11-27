@@ -15,6 +15,7 @@ stand-nixos/
 ├── modules/
 │   ├── photostand.nix        # Module systemd (Docker, sync Git, Docker Compose, mock printer optionnel)
 │   ├── kiosk-i3.nix          # Session i3 + Firefox en plein écran sur le frontend (masque i3status)
+│   ├── camera-tether.nix     # Tethering USB-C Canon (gphoto2) + aperçu instantané imv hors-frontend
 │   └── base-system.nix       # Socle NixOS commun partagé entre le PC réel et la VM de test
 ├── host/
 │   └── default.nix           # Configuration pour un PC physique NixOS frais (`nixosConfigurations.stand`)
@@ -90,7 +91,8 @@ Contrôles i3 disponibles à tout moment (touche `Super` = touche Windows) :
 | `Super + Entrée` | Ouvrir un terminal (`alacritty`) |
 | `Super + D` | Lanceur d'applications (`dmenu`) |
 | `Super + B` | Rouvrir Firefox sur le frontend |
-| `Super + 1..5` | Changer de workspace (le workspace 2 affiche `i3status` sans toucher à Firefox) |
+| `Super + P` | Ouvrir / afficher l'aperçu photo Canon (`imv`) |
+| `Super + 1..5` | Changer de workspace (`2:Apercu` affiche `i3status` + l'aperçu Canon) |
 | `Super + Shift + Q` | Fermer la fenêtre active |
 | `Super + Shift + R` | Redémarrer i3 |
 

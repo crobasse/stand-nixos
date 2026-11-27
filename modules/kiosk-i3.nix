@@ -217,6 +217,21 @@ let
     for_window [class="(?i)firefox"] fullscreen enable
     exec --no-startup-id ${launchFrontendScript}
 
+    ${lib.optionalString (psCfg.camera.enable && psCfg.camera.preview.enable) ''
+      # Aperçu instantané hors-frontend des JPEG reçus du Canon (style Canon EOS Utility)
+      ${
+        if psCfg.camera.preview.mode == "popup" then
+          ''
+            for_window [title="^Photo Stand — Apercu Canon"] floating enable, resize set 1100 740, move position center
+          ''
+        else
+          ''
+            assign [title="^Photo Stand — Apercu Canon"] $ws2
+          ''
+      }
+      exec --no-startup-id ${psCfg.camera.previewWatcherBin}
+    ''}
+
     # --- Contrôles de base i3 ---
     # Basculer le plein écran (permet d'afficher/cacher i3status à tout moment)
     bindsym $mod+f fullscreen toggle
@@ -229,6 +244,11 @@ let
 
     # Rouvrir le frontend Photo Stand si Firefox a été fermé
     bindsym $mod+b exec --no-startup-id ${launchFrontendScript}
+
+    # Afficher / ouvrir l'aperçu photo Canon (imv)
+    ${lib.optionalString (psCfg.camera.enable && psCfg.camera.preview.enable) ''
+      bindsym $mod+p exec --no-startup-id stand-camera-preview
+    ''}
 
     # Fermer la fenêtre active
     bindsym $mod+Shift+q kill
@@ -254,9 +274,9 @@ let
     bindsym $mod+Shift+space floating toggle
     bindsym $mod+space focus mode_toggle
 
-    # Workspaces (passer sur le workspace 2 affiche immédiatement i3status)
+    # Workspaces (passer sur le workspace 2 affiche immédiatement i3status et l'aperçu Canon)
     set $ws1 "1:Stand"
-    set $ws2 "2"
+    set $ws2 "2:Apercu"
     set $ws3 "3"
     set $ws4 "4"
     set $ws5 "5"

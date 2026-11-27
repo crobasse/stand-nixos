@@ -40,6 +40,7 @@ in
     captureBindSource = "/mnt/capture";
     # En VM headless (graphics = false), on désactive X11/i3 ; en mode GUI (`test gui`), on l'active.
     kiosk.enable = lib.mkOverride 900 standConfig.vm.graphics;
+    camera.enable = lib.mkOverride 900 false;
   };
 
   # Ressources et port-forwarding de la VM QEMU
