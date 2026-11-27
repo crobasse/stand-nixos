@@ -114,6 +114,7 @@ let
     name = "photostand-camera-tether";
     runtimeInputs = with pkgs; [
       gphoto2
+      usbutils
       coreutils
       gnugrep
       gnused
@@ -134,40 +135,38 @@ let
       WAS_WAITING=0
 
       while true; do
-        DETECTED="$(gphoto2 --auto-detect 2>/dev/null | grep -E 'usb:[0-9]+,[0-9]+' || true)"
-        if [ -z "$DETECTED" ]; then
+        # Détection passive par lsusb (ne touche pas l'interface PTP du boîtier)
+        if ! lsusb -d 04a9: >/dev/null 2>&1; then
           if [ "$WAS_WAITING" -eq 0 ]; then
-            echo "[camera-tether] Aucun appareil photo détecté en USB. Attente..."
+            echo "[camera-tether] Aucun appareil Canon (04a9) détecté en USB. Attente..."
             WAS_WAITING=1
           fi
           sleep 2
           continue
         fi
 
+        if [ "$WAS_WAITING" -eq 1 ]; then
+          # Laisser le boîtier finir son énumération USB avant d'ouvrir la session PTP
+          sleep 2
+        fi
         WAS_WAITING=0
-        echo "[camera-tether] Appareil détecté : $DETECTED"
+        echo "[camera-tether] Boîtier Canon détecté : $(lsusb -d 04a9: | head -n1)"
 
-        # 1. Configurer l'enregistrement sur la carte SD (pour garder un backup sur le boîtier)
+        # Tout exécuter dans UNE SEULE session PTP gphoto2 :
+        # - disablemodedial=0 : corrige le bug libgphoto2 >= 2.5.31 (issue #1210) qui envoie
+        #   SetModeDialDisable(1) au Canon EOS R6 Mark II et affiche "BUSY" sur le boîtier.
+        # - uilock=0 + --wait-event-and-download : garde le déclencheur physique libre.
+        GPHOTO_ARGS=()
         if [ "$KEEP_ON_SD" = "true" ]; then
-          if gphoto2 --set-config capturetarget=1 >/dev/null 2>&1; then
-            echo "[camera-tether] capturetarget=1 (Carte SD) activé."
-          else
-            echo "[camera-tether] Info : impossible de définir capturetarget=1 (vérifiez le boîtier)."
-          fi
+          GPHOTO_ARGS+=(--set-config capturetarget=1)
         fi
-
-        # 2. Configurer automatiquement le format image (ex: "Large Fine JPEG") si demandé
         if [ -n "$WANTED_FORMAT" ]; then
-          if gphoto2 --set-config-value "/main/imgsettings/imageformat=$WANTED_FORMAT" >/dev/null 2>&1; then
-            echo "[camera-tether] Format image configuré automatiquement sur : $WANTED_FORMAT"
-          else
-            echo "[camera-tether] Attention : impossible de définir imageformat='$WANTED_FORMAT' (lancez 'gphoto2 --get-config /main/imgsettings/imageformat' pour voir les valeurs supportées)."
-          fi
+          GPHOTO_ARGS+=(--set-config-value "/main/imgsettings/imageformat=$WANTED_FORMAT")
         fi
-
-        # 3. Lancer la capture tethered (télécharge dans staging, puis hook déplace vers preview + watch)
-        GPHOTO_ARGS=(
-          --capture-tethered
+        GPHOTO_ARGS+=(
+          --set-config disablemodedial=0
+          --set-config uilock=0
+          --wait-event-and-download
           --filename "$STAGING_DIR/%Y%m%d-%H%M%S-%f.%C"
           --hook-script "${cameraHookScript}/bin/photostand-camera-hook"
         )
@@ -175,12 +174,27 @@ let
           GPHOTO_ARGS+=(--keep)
         fi
 
-        echo "[camera-tether] Écoute des déclenchements en cours..."
-        # `|| true` car gphoto2 quitte en erreur si le boîtier est éteint/débranché : on boucle proprement
-        gphoto2 "''${GPHOTO_ARGS[@]}" || true
+        echo "[camera-tether] Ouverture session PTP (disablemodedial=0 + écoute déclenchements)..."
+        if ! gphoto2 "''${GPHOTO_ARGS[@]}"; then
+          echo "[camera-tether] Session gphoto2 interrompue (code $?). Repli sans imageformat/uilock dans 3s si boîtier toujours présent..."
+          sleep 3
+          if lsusb -d 04a9: >/dev/null 2>&1; then
+            FALLBACK_ARGS=(
+              --set-config disablemodedial=0
+              --wait-event-and-download
+              --filename "$STAGING_DIR/%Y%m%d-%H%M%S-%f.%C"
+              --hook-script "${cameraHookScript}/bin/photostand-camera-hook"
+            )
+            if [ "$KEEP_ON_SD" = "true" ]; then
+              FALLBACK_ARGS=(--set-config capturetarget=1 --keep "''${FALLBACK_ARGS[@]}")
+            fi
+            echo "[camera-tether] Relance en mode écoute simple (disablemodedial=0)..."
+            gphoto2 "''${FALLBACK_ARGS[@]}" || true
+          fi
+        fi
 
-        echo "[camera-tether] Connexion appareil interrompue. Nouvelle détection dans 2s..."
-        sleep 2
+        echo "[camera-tether] Connexion appareil interrompue. Nouvelle vérification dans 5s..."
+        sleep 5
       done
     '';
   };
