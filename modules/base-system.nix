@@ -17,7 +17,7 @@
 
   system.stateVersion = lib.mkDefault "24.11";
   time.timeZone = lib.mkDefault "Europe/Paris";
-  console.keyMap = lib.mkDefault "fr";
+  console.keyMap = lib.mkDefault standConfig.kiosk.keymap;
 
   nix.settings.experimental-features = [
     "nix-command"

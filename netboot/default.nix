@@ -8,6 +8,7 @@
   lib,
   modulesPath,
   pkgs,
+  standConfig,
   ...
 }:
 
@@ -42,7 +43,7 @@ in
   system.stateVersion = "24.11";
   networking.hostName = "photostand-installer";
   time.timeZone = "Europe/Paris";
-  console.keyMap = "fr";
+  console.keyMap = standConfig.kiosk.keymap;
 
   nix.settings.experimental-features = [
     "nix-command"

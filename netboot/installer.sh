@@ -64,7 +64,8 @@ CMD_PROFILES=""
 CMD_STORAGE_ENDPOINT=""
 CMD_AUTO_WIPE="0"
 
-for token in $(cat /proc/cmdline); do
+read -ra CMDLINE_TOKENS < /proc/cmdline
+for token in "${CMDLINE_TOKENS[@]}"; do
   case "$token" in
     stand.repo=*)             CMD_REPO="${token#stand.repo=}" ;;
     stand.ref=*)              CMD_REF="${token#stand.ref=}" ;;
